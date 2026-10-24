@@ -94,12 +94,12 @@ On the Xiaomi Mi NoteBook Ultra / Pro / Max series, the biometric sensor and the
 
 This repository addresses both the hardware microcontroller state and the desktop session policies:
 
-1. **Early Hardware Initializer (`tools/fpc1022-wake.c` & `configs/99-fpc1022-wake.rules`)**:
-   - A fast, lightweight C utility (`fpc1022-wake`) sends `CMD_INDICATE_S_STATE` (`0x08`, value `0x0010` = S0) and `CMD_INIT` (`0x01`) via USB control transfers directly to `10a5:9200`.
-   - An early udev rule (`/etc/udev/rules.d/99-fpc1022-wake.rules`) executes `fpc1022-wake` immediately when USB `10a5:9200` is enumerated by the kernel.
-   - A dedicated systemd boot unit (`/etc/systemd/system/fpc1022-wake.service`) ensures initialization completes before user login.
+1. **Early Hardware Initializer (`tools/fpc1022-wake.c` & `configs/fpc1022-wake.service`)**:
+   - A fast, lightweight C utility (`fpc1022-wake`) sends `CMD_INDICATE_S_STATE` (`0x08`, value `0x0010` = S0) via a standalone USB control transfer directly to `10a5:9200`.
+   - A dedicated systemd boot unit (`/etc/systemd/system/fpc1022-wake.service`) ensures S0 initialization completes cleanly at boot before user login.
    - A systemd-sleep hook (`/usr/lib/systemd/system-sleep/fpc1022-wake`) re-asserts S0 state instantly when waking from suspend/hibernate.
-   - **Result**: The physical power button works immediately from the second the laptop boots up or wakes from sleep, without needing any prior fingerprint interaction.
+   - An access udev rule (`/etc/udev/rules.d/99-fpc1022-wake.rules`) ensures proper active user session tagging without triggering re-enumeration feedback loops.
+   - **Result**: The physical power button works immediately from the second the laptop boots up or wakes from sleep, while biometric scanning remains fully responsive with zero USB reset cycles.
 2. **`systemd-logind` Configuration (`configs/10-power-button.conf`)**:
    ```ini
    [Login]
@@ -155,7 +155,7 @@ sudo ./install.sh
 5. Sets required SELinux permissions (`lib_t`).
 6. Configures package manager protection (`excludepkgs=libfprint*` in `/etc/dnf/dnf.conf`, `apt-mark hold`, or `IgnorePkg` in pacman).
 7. Compiles and installs the early hardware wake utility `/usr/local/bin/fpc1022-wake`.
-8. Deploys `/etc/udev/rules.d/99-fpc1022-wake.rules` to instantly wake the power button on USB enumeration at boot.
+8. Deploys `/etc/udev/rules.d/99-fpc1022-wake.rules` to configure session access tags.
 9. Deploys and enables `/etc/systemd/system/fpc1022-wake.service` for system boot initialization.
 10. Installs `/usr/lib/systemd/system-sleep/fpc1022-wake` to restore power button state upon waking from suspend/hibernate.
 11. Installs `/etc/systemd/logind.conf.d/10-power-button.conf` (`HandlePowerKey=poweroff`, `PowerKeyIgnoreInhibited=no`) and reloads `systemd-logind`.

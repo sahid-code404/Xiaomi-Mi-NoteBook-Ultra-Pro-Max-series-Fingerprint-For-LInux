@@ -515,13 +515,13 @@ EOF
         echo -e "${GREEN}[✔] Installed prebuilt $wake_bin.${NC}"
     fi
 
-    # 5. Install early udev rule for instant trigger when USB 10a5:9200 enumerates
+    # 5. Install udev access rule for FPC1022 USB device (10a5:9200)
     local udev_rule="$SCRIPT_DIR/configs/99-fpc1022-wake.rules"
     if [[ -f "$udev_rule" ]]; then
-        echo -e "${BLUE}[*] Installing udev wake rule to /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
+        echo -e "${BLUE}[*] Installing udev rule to /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
         cp -p "$udev_rule" /etc/udev/rules.d/99-fpc1022-wake.rules
         chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
-        echo -e "${GREEN}[✔] Installed udev rule for FPC1022 hardware initialization.${NC}"
+        echo -e "${GREEN}[✔] Installed udev access rule for FPC1022.${NC}"
     fi
 
     # 6. Install systemd boot service fpc1022-wake.service
