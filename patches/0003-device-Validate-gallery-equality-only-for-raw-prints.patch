@@ -1,0 +1,39 @@
+From 094b65d03bc25bca746cd3fe39356f7af40643ac Mon Sep 17 00:00:00 2001
+From: Omkar Chandorkar <gotenksIN@aospa.co>
+Date: Sat, 5 Sep 2026 08:17:54 +0530
+Subject: [PATCH 3/6] device: Validate gallery equality only for raw prints
+
+Restrict gallery equality checks in verify and identify reports to
+match-on-chip prints. Host-side NBIS and SIGFM probes are distinct
+from enrolled templates even when matching succeeds.
+
+Signed-off-by: Omkar Chandorkar <gotenksIN@aospa.co>
+---
+ libfprint/fpi-device.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libfprint/fpi-device.c b/libfprint/fpi-device.c
+index 9500b3a..5aa4d8c 100644
+--- a/libfprint/fpi-device.c
++++ b/libfprint/fpi-device.c
+@@ -2170,7 +2170,7 @@ fpi_device_verify_report (FpDevice      *device,
+           g_object_ref (data->match);
+ 
+           if (print &&
+-              fpi_print_get_type (print) != FPI_PRINT_NBIS &&
++              fpi_print_get_type (print) == FPI_PRINT_RAW &&
+               !fp_print_equal (print, data->match))
+             {
+               g_warning ("Driver reported a match providing a scanned print that is not matching it.");
+@@ -2270,7 +2270,7 @@ fpi_device_identify_report (FpDevice *device,
+     }
+   else
+     {
+-      if (match && print && fpi_print_get_type (print) != FPI_PRINT_NBIS &&
++      if (match && print && fpi_print_get_type (print) == FPI_PRINT_RAW &&
+           !g_ptr_array_find_with_equal_func (data->gallery, print,
+                                              (GEqualFunc) fp_print_equal, NULL))
+         {
+-- 
+2.56.0
+

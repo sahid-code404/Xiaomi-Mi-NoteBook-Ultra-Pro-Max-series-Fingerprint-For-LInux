@@ -1,0 +1,41 @@
+# Build and compilation directories
+build/
+build-*/
+_build/
+meson-logs/
+meson-private/
+.ninja_log
+.ninja_deps
+compile_commands.json
+
+# C/C++ object files and archives
+*.o
+*.a
+*.la
+*.lo
+
+# Python byte-code / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary backups and swap files
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+*.tmp
+*.log
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.directory
+
+# OS generated files
+.DS_Store
+Thumbs.db

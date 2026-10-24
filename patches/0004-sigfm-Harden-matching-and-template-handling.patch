@@ -1,0 +1,1291 @@
+From 406c10e10def764b2cddd7c4ae3bf73b3337bcc7 Mon Sep 17 00:00:00 2001
+From: Omkar Chandorkar <gotenksIN@aospa.co>
+Date: Sat, 5 Sep 2026 08:18:07 +0530
+Subject: [PATCH 4/6] sigfm: Harden matching and template handling
+
+Bound keypoint counts, descriptor dimensions, stream reads, and
+geometric matching work. Serialize fixed-width little-endian fields
+while retaining support for legacy templates and reporting errors.
+
+Keep image extraction and completion in the private API. Align the
+benchmark argument order with production matching, and register the
+SIGFM tests with Meson.
+
+Signed-off-by: Omkar Chandorkar <gotenksIN@aospa.co>
+---
+ libfprint/fp-image.c            | 126 --------------------
+ libfprint/fp-print.c            |  14 +++
+ libfprint/fpi-image-device.c    |  16 ++-
+ libfprint/fpi-image.c           | 138 ++++++++++++++++++++++
+ libfprint/fpi-image.h           |  13 ++-
+ libfprint/fpi-print.c           |   2 +-
+ libfprint/sigfm/binary.hpp      |  99 ++++++++++------
+ libfprint/sigfm/meson.build     |   7 +-
+ libfprint/sigfm/sigfm-bench.cpp |   2 +-
+ libfprint/sigfm/sigfm.cpp       | 197 ++++++++++++++++++++++++++------
+ libfprint/sigfm/tests.cpp       |  35 +++---
+ tests/test-fpi-print.c          | 190 +++++++++++++++++++++++++++++-
+ 12 files changed, 607 insertions(+), 232 deletions(-)
+
+diff --git a/libfprint/fp-image.c b/libfprint/fp-image.c
+index 9880f73..048cad8 100644
+--- a/libfprint/fp-image.c
++++ b/libfprint/fp-image.c
+@@ -171,17 +171,6 @@ typedef struct
+   gboolean            image_changed;
+ } DetectMinutiaeData;
+ 
+-#ifdef HAVE_SIGFM
+-typedef struct
+-{
+-  SigfmImgInfo      * sigfm_info;
+-  guchar            * image;
+-  gint                width;
+-  gint                height;
+-  GAsyncReadyCallback user_cb;
+-} ExtractSigfmData;
+-#endif
+-
+ static void
+ fp_image_detect_minutiae_free (DetectMinutiaeData *data)
+ {
+@@ -196,37 +185,6 @@ fp_image_detect_minutiae_free (DetectMinutiaeData *data)
+ 
+ G_DEFINE_AUTOPTR_CLEANUP_FUNC (DetectMinutiaeData, fp_image_detect_minutiae_free)
+ 
+-#ifdef HAVE_SIGFM
+-static void
+-fp_image_sigfm_extract_free (ExtractSigfmData * data)
+-{
+-  g_clear_pointer (&data->image, g_free);
+-  g_clear_pointer (&data->sigfm_info, sigfm_free_info);
+-  g_free (data);
+-}
+-
+-static void
+-fp_image_sigfm_extract_cb (GObject * source_object, GAsyncResult * res,
+-                           gpointer user_data)
+-{
+-  GTask * task = G_TASK (res);
+-  FpImage * image;
+-  ExtractSigfmData * data = g_task_get_task_data (task);
+-
+-  if (!g_task_had_error (task))
+-    {
+-      image = FP_IMAGE (source_object);
+-
+-      g_clear_pointer (&image->data, g_free);
+-      image->data = g_steal_pointer (&data->image);
+-      image->sigfm_info = g_steal_pointer (&data->sigfm_info);
+-    }
+-
+-  if (data->user_cb)
+-    data->user_cb (source_object, res, user_data);
+-}
+-#endif
+-
+ static gboolean
+ fp_image_detect_minutiae_nbis_finish (FpImage *self,
+                                       GTask   *task,
+@@ -315,40 +273,6 @@ invert_colors (guint8 *data, gint width, gint height)
+     data[i] = 0xff - data[i];
+ }
+ 
+-#ifdef HAVE_SIGFM
+-static void
+-fp_image_sigfm_extract_thread_func (GTask * task, void * src_obj,
+-                                    void * task_data,
+-                                    GCancellable * cancellable)
+-{
+-  ExtractSigfmData * data = task_data;
+-  GTimer * timer = g_timer_new ();
+-
+-  data->sigfm_info = sigfm_extract (data->image, data->width, data->height);
+-  g_timer_stop (timer);
+-  fp_dbg ("sigfm extract completed in %f secs", g_timer_elapsed (timer, NULL));
+-  g_timer_destroy (timer);
+-
+-  if (!data->sigfm_info)
+-    {
+-      fp_err ("extract sigfm info failed");
+-      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "SIGFM scan failed");
+-      g_object_unref (task);
+-      return;
+-    }
+-
+-  if (sigfm_keypoints_count (data->sigfm_info) < 25)
+-    {
+-      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+-                               "No enough keypoints found");
+-      g_object_unref (task);
+-      return;
+-    }
+-  g_task_return_boolean (task, TRUE);
+-  g_object_unref (task);
+-}
+-#endif
+-
+ static void
+ fp_image_detect_minutiae_thread_func (GTask        *task,
+                                       gpointer      source_object,
+@@ -527,51 +451,6 @@ fp_image_get_minutiae (FpImage *self)
+   return self->minutiae;
+ }
+ 
+-#ifdef HAVE_SIGFM
+-/**
+- * fp_image_get_sigfm_info:
+- * @self: A #FpImage
+- *
+- * Gets the SIGFM keypoints and descriptors for an image. This data must
+- * not be modified or freed. You need to first extract keypoints and
+- * descriptors using fp_image_extract_sigfm_info().
+- *
+- * Returns: (skip): SIGFM keypoints and descriptors
+- */
+-SigfmImgInfo *
+-fp_image_get_sigfm_info (FpImage * self)
+-{
+-  return self->sigfm_info;
+-}
+-
+-/*
+- * fp_image_extract_sigfm_info:
+- *
+- * Extracts SIFT keypoints and descriptors from an image.
+- * Completion is handled via fp_image_detect_minutiae_finish().
+- */
+-void
+-fp_image_extract_sigfm_info (FpImage * self, GCancellable * cancellable,
+-                             GAsyncReadyCallback callback, gpointer user_data)
+-{
+-  GTask * task;
+-  ExtractSigfmData * data = g_new0 (ExtractSigfmData, 1);
+-
+-  task = g_task_new (self, cancellable, fp_image_sigfm_extract_cb, user_data);
+-  g_task_set_source_tag (task, fp_image_extract_sigfm_info);
+-
+-  data->image = g_malloc (self->width * self->height);
+-  memcpy (data->image, self->data, self->width * self->height);
+-  data->width = self->width;
+-  data->height = self->height;
+-  data->user_cb = callback;
+-
+-  g_task_set_task_data (task, data,
+-                        (GDestroyNotify) fp_image_sigfm_extract_free);
+-  g_task_run_in_thread (task, fp_image_sigfm_extract_thread_func);
+-}
+-#endif
+-
+ /**
+  * fp_image_detect_minutiae:
+  * @self: A #FpImage
+@@ -629,11 +508,6 @@ fp_image_detect_minutiae_finish (FpImage      *self,
+   g_return_val_if_fail (FP_IS_IMAGE (self), FALSE);
+   g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
+ 
+-#ifdef HAVE_SIGFM
+-  if (g_task_get_source_tag (G_TASK (result)) == fp_image_extract_sigfm_info)
+-    return g_task_propagate_boolean (G_TASK (result), error);
+-#endif
+-
+   g_return_val_if_fail (g_task_get_source_tag (G_TASK (result)) ==
+                         fp_image_detect_minutiae, FALSE);
+ 
+diff --git a/libfprint/fp-print.c b/libfprint/fp-print.c
+index 2354365..a3877a2 100644
+--- a/libfprint/fp-print.c
++++ b/libfprint/fp-print.c
+@@ -695,6 +695,9 @@ fp_print_serialize (FpPrint *print,
+   g_assert (data);
+   g_assert (length);
+ 
++  *data = NULL;
++  *length = 0;
++
+   g_variant_builder_add (&builder, "i", print->type);
+   g_variant_builder_add (&builder, "s", print->driver);
+   g_variant_builder_add (&builder, "s", print->device_id);
+@@ -763,6 +766,17 @@ fp_print_serialize (FpPrint *print,
+           SigfmImgInfo * info = g_ptr_array_index (print->prints, i);
+           int slen;
+           unsigned char * serialized = sigfm_serialize_binary (info, &slen);
++
++          if (serialized == NULL)
++            {
++              g_variant_builder_clear (&nested);
++              g_variant_builder_clear (&builder);
++              g_ptr_array_free (to_free, TRUE);
++              g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                           "Failed to serialize SIGFM print data");
++              return FALSE;
++            }
++
+           g_variant_builder_add_value (
+             &nested, g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE,
+                                                 serialized, slen, 1));
+diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
+index 4272e29..9f939c5 100644
+--- a/libfprint/fpi-image-device.c
++++ b/libfprint/fpi-image-device.c
+@@ -251,12 +251,20 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+   FpDevice *device = FP_DEVICE (self);
+   FpImageDevicePrivate *priv;
+   FpiDeviceAction action;
++  gboolean success;
+ 
+   /* Note: We rely on the device to not disappear during an operation. */
+   priv = fp_image_device_get_instance_private (FP_IMAGE_DEVICE (device));
+   priv->minutiae_scan_active = FALSE;
+ 
+-  if (!fp_image_detect_minutiae_finish (image, res, &error))
++#ifdef HAVE_SIGFM
++  if (priv->algorithm == FPI_PRINT_SIGFM)
++    success = fpi_image_extract_sigfm_info_finish (image, res, &error);
++  else
++#endif
++    success = fp_image_detect_minutiae_finish (image, res, &error);
++
++  if (!success)
+     {
+       /* Cancel operation . */
+       if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+@@ -499,9 +507,9 @@ fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
+ #ifdef HAVE_SIGFM
+   if (priv->algorithm == FPI_PRINT_SIGFM)
+     {
+-      fp_image_extract_sigfm_info (image,
+-                                   fpi_device_get_cancellable (FP_DEVICE (self)),
+-                                   fpi_image_device_minutiae_detected, self);
++      fpi_image_extract_sigfm_info (image,
++                                    fpi_device_get_cancellable (FP_DEVICE (self)),
++                                    fpi_image_device_minutiae_detected, self);
+     }
+   else
+ #endif
+diff --git a/libfprint/fpi-image.c b/libfprint/fpi-image.c
+index 98f412a..393cd99 100644
+--- a/libfprint/fpi-image.c
++++ b/libfprint/fpi-image.c
+@@ -152,3 +152,141 @@ fpi_image_resize (FpImage *orig_img,
+   return g_object_ref (orig_img);
+ #endif
+ }
++
++#ifdef HAVE_SIGFM
++typedef struct
++{
++  SigfmImgInfo      * sigfm_info;
++  guchar            * image;
++  gint                width;
++  gint                height;
++  GAsyncReadyCallback user_cb;
++} ExtractSigfmData;
++
++static void
++fpi_image_sigfm_extract_free (ExtractSigfmData * data)
++{
++  g_clear_pointer (&data->image, g_free);
++  g_clear_pointer (&data->sigfm_info, sigfm_free_info);
++  g_free (data);
++}
++
++static void
++fpi_image_sigfm_extract_cb (GObject * source_object, GAsyncResult * res,
++                            gpointer user_data)
++{
++  GTask * task = G_TASK (res);
++  FpImage * image;
++  ExtractSigfmData * data = g_task_get_task_data (task);
++
++  if (!g_task_had_error (task))
++    {
++      image = FP_IMAGE (source_object);
++
++      g_clear_pointer (&image->data, g_free);
++      image->data = g_steal_pointer (&data->image);
++      image->sigfm_info = g_steal_pointer (&data->sigfm_info);
++    }
++
++  if (data->user_cb)
++    data->user_cb (source_object, res, user_data);
++}
++
++static void
++fpi_image_sigfm_extract_thread_func (GTask * task, void * src_obj,
++                                     void * task_data,
++                                     GCancellable * cancellable)
++{
++  ExtractSigfmData * data = task_data;
++  GTimer * timer = g_timer_new ();
++
++  data->sigfm_info = sigfm_extract (data->image, data->width, data->height);
++  g_timer_stop (timer);
++  fp_dbg ("sigfm extract completed in %f secs", g_timer_elapsed (timer, NULL));
++  g_timer_destroy (timer);
++
++  if (!data->sigfm_info)
++    {
++      fp_err ("extract sigfm info failed");
++      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "SIGFM scan failed");
++      g_object_unref (task);
++      return;
++    }
++
++  if (sigfm_keypoints_count (data->sigfm_info) < 25)
++    {
++      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
++                               "No enough keypoints found");
++      g_object_unref (task);
++      return;
++    }
++  g_task_return_boolean (task, TRUE);
++  g_object_unref (task);
++}
++
++/**
++ * fpi_image_get_sigfm_info:
++ * @self: A #FpImage
++ *
++ * Gets the SIGFM keypoints and descriptors for an image. This data must
++ * not be modified or freed. You need to first extract keypoints and
++ * descriptors using fpi_image_extract_sigfm_info().
++ *
++ * Returns: (skip): SIGFM keypoints and descriptors
++ */
++SigfmImgInfo *
++fpi_image_get_sigfm_info (FpImage * self)
++{
++  return self->sigfm_info;
++}
++
++/*
++ * fpi_image_extract_sigfm_info:
++ *
++ * Extracts SIFT keypoints and descriptors from an image.
++ * Completion is handled via fpi_image_extract_sigfm_info_finish().
++ */
++void
++fpi_image_extract_sigfm_info (FpImage * self, GCancellable * cancellable,
++                              GAsyncReadyCallback callback, gpointer user_data)
++{
++  GTask * task;
++  ExtractSigfmData * data = g_new0 (ExtractSigfmData, 1);
++
++  task = g_task_new (self, cancellable, fpi_image_sigfm_extract_cb, user_data);
++  g_task_set_source_tag (task, fpi_image_extract_sigfm_info);
++
++  data->image = g_malloc (self->width * self->height);
++  memcpy (data->image, self->data, self->width * self->height);
++  data->width = self->width;
++  data->height = self->height;
++  data->user_cb = callback;
++
++  g_task_set_task_data (task, data,
++                        (GDestroyNotify) fpi_image_sigfm_extract_free);
++  g_task_run_in_thread (task, fpi_image_sigfm_extract_thread_func);
++}
++
++/**
++ * fpi_image_extract_sigfm_info_finish:
++ * @self: A #FpImage
++ * @result: The result of fpi_image_extract_sigfm_info()
++ * @error: Return location for an error
++ *
++ * Completes SIGFM feature extraction.
++ *
++ * Returns: %TRUE on success, %FALSE on error
++ */
++gboolean
++fpi_image_extract_sigfm_info_finish (FpImage      *self,
++                                     GAsyncResult *result,
++                                     GError      **error)
++{
++  g_return_val_if_fail (FP_IS_IMAGE (self), FALSE);
++  g_return_val_if_fail (g_task_is_valid (result, self), FALSE);
++  g_return_val_if_fail (g_task_get_source_tag (G_TASK (result)) ==
++                        fpi_image_extract_sigfm_info, FALSE);
++
++  return g_task_propagate_boolean (G_TASK (result), error);
++}
++#endif
+diff --git a/libfprint/fpi-image.h b/libfprint/fpi-image.h
+index 68d040b..74d46de 100644
+--- a/libfprint/fpi-image.h
++++ b/libfprint/fpi-image.h
+@@ -91,9 +91,12 @@ FpImage *fpi_image_resize (FpImage *orig,
+                            guint    h_factor);
+ 
+ #ifdef HAVE_SIGFM
+-SigfmImgInfo * fp_image_get_sigfm_info (FpImage *self);
+-void           fp_image_extract_sigfm_info (FpImage            *self,
+-                                            GCancellable       *cancellable,
+-                                            GAsyncReadyCallback callback,
+-                                            gpointer            user_data);
++SigfmImgInfo * fpi_image_get_sigfm_info (FpImage *self);
++void           fpi_image_extract_sigfm_info (FpImage            *self,
++                                             GCancellable       *cancellable,
++                                             GAsyncReadyCallback callback,
++                                             gpointer            user_data);
++gboolean       fpi_image_extract_sigfm_info_finish (FpImage      *self,
++                                                    GAsyncResult *result,
++                                                    GError      **error);
+ #endif
+diff --git a/libfprint/fpi-print.c b/libfprint/fpi-print.c
+index a7f3746..9d497f4 100644
+--- a/libfprint/fpi-print.c
++++ b/libfprint/fpi-print.c
+@@ -242,7 +242,7 @@ fpi_print_add_from_image (FpPrint *print,
+ #ifdef HAVE_SIGFM
+   else if (print->type == FPI_PRINT_SIGFM)
+     {
+-      SigfmImgInfo *info = fp_image_get_sigfm_info (image);
++      SigfmImgInfo *info = fpi_image_get_sigfm_info (image);
+ 
+       if (!info)
+         {
+diff --git a/libfprint/sigfm/binary.hpp b/libfprint/sigfm/binary.hpp
+index 5e14960..eada381 100644
+--- a/libfprint/sigfm/binary.hpp
++++ b/libfprint/sigfm/binary.hpp
+@@ -9,7 +9,9 @@
+ 
+ #pragma once
+ 
++#include <glib.h>
+ #include "opencv2/core/mat.hpp"
++#include <algorithm>
+ #include <array>
+ #include <cstring>
+ #include <stdexcept>
+@@ -19,6 +21,9 @@
+ namespace bin {
+ using byte = unsigned char;
+ 
++constexpr std::size_t MAX_KEYPOINTS = 2048;
++constexpr int SIFT_DESCRIPTOR_COLS = 128;
++
+ class stream;
+ 
+ template<typename T, typename EnableIf = void>
+@@ -71,25 +76,6 @@ public:
+         return *this;
+     }
+ 
+-    template<typename T, std::enable_if_t<serializer<T>::value, bool> = true>
+-    stream& serialize(const T& m, stream& out)
+-    {
+-        serializer<T>::serialize(m, out);
+-        return out;
+-    }
+-
+-    template<
+-        typename Iter,
+-        std::enable_if_t<std::is_same_v<typename std::iterator_traits<
+-                                            std::decay_t<Iter>>::value_type,
+-                                        byte>,
+-                         bool> = true>
+-    constexpr stream& read(Iter&& begin, Iter&& end)
+-    {
+-        const auto dist = std::distance(begin, end);
+-        return stream::read(begin, dist);
+-    }
+-
+     template<
+         typename Iter,
+         std::enable_if_t<std::is_same_v<typename std::iterator_traits<
+@@ -98,41 +84,44 @@ public:
+                          bool> = true>
+     constexpr stream& read(Iter&& begin, std::size_t dist)
+     {
+-        if (dist > store_.size()) {
+-            throw std::runtime_error{"trying to read too much from a stream. wanted: " + std::to_string(dist) + " available: " + std::to_string(store_.size())};
++        if (dist > size()) {
++            throw std::runtime_error{"trying to read too much from a stream. wanted: " + std::to_string(dist) + " available: " + std::to_string(size())};
+         }
+-        std::copy(store_.begin(), store_.begin() + dist, begin);
+-        store_.erase(store_.begin(), store_.begin() + dist);
++        std::copy(store_.begin() + read_offset_,
++                  store_.begin() + read_offset_ + dist, begin);
++        read_offset_ += dist;
+         return *this;
+     }
+-    byte* copy_buffer() const
+-    {
+-        byte* raw = static_cast<byte*>(malloc(store_.size()));
+-        std::copy(store_.begin(), store_.end(), raw);
+-        return raw;
+-    }
+-    std::size_t size() const { return store_.size(); }
++    const byte* data() const { return store_.data() + read_offset_; }
++    std::size_t size() const { return store_.size() - read_offset_; }
+ 
+ private:
+     std::vector<byte> store_;
++    std::size_t read_offset_ = 0;
+ };
+ 
+ template<typename T>
+-struct serializer<T, std::enable_if_t<std::is_trivial_v<T>>> : public std::true_type {
++struct serializer<T, std::enable_if_t<std::is_arithmetic_v<T>>> : public std::true_type {
+     static void serialize(T v, stream& out) {
+         using seg_store = std::array<byte, sizeof(T)>;
+         alignas(T) seg_store s = {};
+         std::memcpy(s.data(), &v, sizeof(T));
++#if G_BYTE_ORDER == G_BIG_ENDIAN
++        std::reverse(s.begin(), s.end());
++#endif
+         out.write(s.begin(), s.end());
+     }
+ };
+ 
+ 
+ template<typename T>
+-struct deserializer<T, std::enable_if_t<std::is_trivial_v<T>>> : public std::true_type {
++struct deserializer<T, std::enable_if_t<std::is_arithmetic_v<T>>> : public std::true_type {
+     static T deserialize(stream& in) {
+         alignas(T) std::array<byte, sizeof(T)> s = {};
+         in.read(s.begin(), s.size());
++#if G_BYTE_ORDER == G_BIG_ENDIAN
++        std::reverse(s.begin(), s.end());
++#endif
+         T v;
+         std::memcpy(&v, s.data(), s.size());
+         return v;
+@@ -144,8 +133,20 @@ template<>
+ struct serializer<cv::Mat> : public std::true_type {
+     static void serialize(const cv::Mat& m, stream& out)
+     {
+-        out << m.type() << m.rows << m.cols;
+-        out.write(m.datastart, m.dataend);
++        if (!m.empty() &&
++            (m.type() != CV_32F || m.cols != SIFT_DESCRIPTOR_COLS ||
++             m.rows > static_cast<int>(MAX_KEYPOINTS))) {
++            throw std::runtime_error{"invalid descriptor matrix"};
++        }
++
++        const auto type = static_cast<guint32>(m.empty() ? CV_32F : m.type());
++        const auto rows = static_cast<guint32>(m.rows);
++        const auto cols = static_cast<guint32>(m.empty() ? SIFT_DESCRIPTOR_COLS : m.cols);
++
++        out << type << rows << cols;
++        for (int row = 0; row < m.rows; row++)
++            for (int col = 0; col < m.cols; col++)
++                out << m.at<float>(row, col);
+     }
+ };
+ 
+@@ -153,11 +154,27 @@ template<>
+ struct deserializer<cv::Mat> : public std::true_type {
+     static cv::Mat deserialize(stream& in)
+     {
+-        int rows, cols, type;
++        guint32 rows, cols, type;
+         in >> type >> rows >> cols;
++
++        if (rows == 0) {
++            if (type != CV_32F || cols != SIFT_DESCRIPTOR_COLS) {
++                throw std::runtime_error{"invalid empty descriptor matrix"};
++            }
++            return {};
++        }
++
++        if (rows > MAX_KEYPOINTS || cols != SIFT_DESCRIPTOR_COLS ||
++            type != CV_32F ||
++            static_cast<std::size_t>(rows) * cols * sizeof(float) > in.size()) {
++            throw std::runtime_error{"invalid descriptor matrix"};
++        }
++
+         cv::Mat m;
+         m.create(rows, cols, type);
+-        in.read(m.data, std::distance(m.datastart, m.dataend));
++        for (guint32 row = 0; row < rows; row++)
++            for (guint32 col = 0; col < cols; col++)
++                in >> m.at<float>(row, col);
+         return m;
+     }
+ };
+@@ -204,7 +221,10 @@ template<typename T>
+ struct serializer<std::vector<T>, std::enable_if_t<serializer<T>::value>> : public std::true_type {
+     static void serialize(const std::vector<T>& vs, stream& out)
+     {
+-        out << static_cast<std::size_t>(vs.size());
++        if (vs.size() > MAX_KEYPOINTS) {
++            throw std::runtime_error{"invalid vector size"};
++        }
++        out << static_cast<guint32>(vs.size());
+         std::for_each(vs.begin(), vs.end(),
+                       [&out](const auto& el) { out << el; });
+     }
+@@ -214,8 +234,11 @@ template<typename T>
+ struct deserializer<std::vector<T>, std::enable_if_t<deserializer<T>::value>> : public std::true_type {
+     static std::vector<T> deserialize(stream& in)
+     {
+-        std::size_t size;
++        guint32 size;
+         in >> size;
++        if (size > MAX_KEYPOINTS || size > in.size()) {
++            throw std::runtime_error{"invalid vector size"};
++        }
+         std::vector<T> vs;
+         vs.reserve(size);
+         for (std::size_t n = 0; n != size; ++n) {
+diff --git a/libfprint/sigfm/meson.build b/libfprint/sigfm/meson.build
+index cd8dfe3..10f41b4 100644
+--- a/libfprint/sigfm/meson.build
++++ b/libfprint/sigfm/meson.build
+@@ -7,7 +7,7 @@ have_sigfm = have_opencv
+ if have_sigfm
+   libsigfm = static_library('sigfm',
+           sigfm_sources,
+-          dependencies: [opencv],
++          dependencies: [glib_dep, opencv],
+           cpp_args: cpp.get_supported_arguments([
+               '-Wno-suggest-attribute=format',
+           ]),
+@@ -15,13 +15,14 @@ if have_sigfm
+ 
+   doctest = dependency('doctest', required: false)
+   if doctest.found()
+-    sigfm_tests = executable('sigfm-tests', ['./tests.cpp'], dependencies: [doctest, opencv], link_with: [libsigfm])
++    sigfm_tests = executable('sigfm-tests', ['./tests.cpp'], dependencies: [doctest, glib_dep, opencv], link_with: [libsigfm])
++    test('sigfm', sigfm_tests)
+   endif
+ 
+   # FAR/FRR benchmark over a fingerprint dataset. Not installed and not run as
+   # part of the test suite: it needs a dataset that cannot be shipped here.
+   sigfm_bench = executable('sigfm-bench', ['./sigfm-bench.cpp'],
+-          dependencies: [opencv],
++          dependencies: [glib_dep, opencv],
+           link_with: [libsigfm],
+           build_by_default: false,
+           install: false,
+diff --git a/libfprint/sigfm/sigfm-bench.cpp b/libfprint/sigfm/sigfm-bench.cpp
+index 1c5556c..6a78b07 100644
+--- a/libfprint/sigfm/sigfm-bench.cpp
++++ b/libfprint/sigfm/sigfm-bench.cpp
+@@ -338,7 +338,7 @@ int main(int argc, char** argv)
+             /* Best score across the gallery, as fpi_print_sigfm_match does. */
+             int best = 0;
+             for (const auto& g : gal) {
+-                const int s = sigfm_match_score(p.info, g.info);
++                const int s = sigfm_match_score(g.info, p.info);
+                 cmp_count++;
+                 if (s > best)
+                     best = s;
+diff --git a/libfprint/sigfm/sigfm.cpp b/libfprint/sigfm/sigfm.cpp
+index 5fac2ed..f7df241 100644
+--- a/libfprint/sigfm/sigfm.cpp
++++ b/libfprint/sigfm/sigfm.cpp
+@@ -15,6 +15,8 @@
+ #include "opencv2/core/types.hpp"
+ #include "opencv2/features2d.hpp"
+ #include <algorithm>
++#include <array>
++#include <climits>
+ #include <cstdlib>
+ #include <cstring>
+ #include <iterator>
+@@ -32,6 +34,8 @@ template<>
+ struct serializer<SigfmImgInfo> : public std::true_type {
+     static void serialize(const SigfmImgInfo& info, stream& out)
+     {
++        if (info.descriptors.rows != static_cast<int>(info.keypoints.size()))
++            throw std::runtime_error{"keypoint and descriptor counts differ"};
+         out << info.keypoints << info.descriptors;
+     }
+ };
+@@ -42,6 +46,8 @@ struct deserializer<SigfmImgInfo> : public std::true_type {
+     {
+         SigfmImgInfo info;
+         in >> info.keypoints >> info.descriptors;
++        if (info.descriptors.rows != static_cast<int>(info.keypoints.size()))
++            throw std::runtime_error{"keypoint and descriptor counts differ"};
+         return info;
+     }
+ };
+@@ -53,15 +59,10 @@ constexpr auto length_match = 0.05;
+ constexpr auto angle_match = 0.05;
+ constexpr auto min_match = 5;
+ constexpr auto max_matches = std::size_t{176};
++constexpr auto max_angles = std::size_t{500};
+ struct match {
+     cv::Point2i p1;
+     cv::Point2i p2;
+-    match(cv::Point2i ip1, cv::Point2i ip2) : p1{ip1}, p2{ip2} {}
+-    match() : p1{cv::Point2i(0, 0)}, p2{cv::Point2i(0, 0)} {}
+-    bool operator==(const match& right) const
+-    {
+-        return std::tie(this->p1, this->p2) == std::tie(right.p1, right.p2);
+-    }
+     bool operator<(const match& right) const
+     {
+         return std::tie(this->p1.y, this->p1.x, this->p2.y, this->p2.x) <
+@@ -71,11 +72,6 @@ struct match {
+ struct angle {
+     double cos;
+     double sin;
+-    match corr_matches[2];
+-    angle(double cos_, double sin_, match m1, match m2)
+-        : cos{cos_}, sin{sin_}, corr_matches{m1, m2}
+-    {
+-    }
+ };
+ } // namespace
+ 
+@@ -85,37 +81,160 @@ int sigfm_keypoints_count(SigfmImgInfo* info) { return info->keypoints.size(); }
+ 
+ namespace {
+ constexpr unsigned char sigfm_blob_magic[4] = {'S', 'G', 'F', 'M'};
+-constexpr unsigned char sigfm_blob_version = 1;
++constexpr unsigned char sigfm_blob_version_legacy = 1;
++constexpr unsigned char sigfm_blob_version = 2;
++constexpr std::size_t sigfm_keypoint_size = 7 * sizeof(guint32);
++constexpr std::size_t sigfm_blob_max_size =
++    5 + sizeof(guint64) + bin::MAX_KEYPOINTS * sigfm_keypoint_size +
++    3 * sizeof(guint32) +
++    bin::MAX_KEYPOINTS * bin::SIFT_DESCRIPTOR_COLS * sizeof(float);
++
++enum class legacy_byte_order {
++    little,
++    big,
++};
++
++template<typename T>
++T read_legacy_value(bin::stream& in, legacy_byte_order order)
++{
++    alignas(T) std::array<bin::byte, sizeof(T)> bytes{};
++    in.read(bytes.begin(), bytes.size());
++#if G_BYTE_ORDER == G_LITTLE_ENDIAN
++    if (order == legacy_byte_order::big)
++#else
++    if (order == legacy_byte_order::little)
++#endif
++        std::reverse(bytes.begin(), bytes.end());
++
++    T value;
++    std::memcpy(&value, bytes.data(), sizeof(value));
++    return value;
++}
++
++template<typename Size>
++SigfmImgInfo deserialize_legacy_v1(bin::stream& in, legacy_byte_order order)
++{
++    const auto count = read_legacy_value<Size>(in, order);
++    if (count > bin::MAX_KEYPOINTS || count > in.size())
++        throw std::runtime_error{"invalid legacy keypoint count"};
++
++    SigfmImgInfo info;
++    info.keypoints.reserve(static_cast<std::size_t>(count));
++    for (Size index = 0; index < count; index++) {
++        cv::KeyPoint point;
++        point.class_id = read_legacy_value<int>(in, order);
++        point.angle = read_legacy_value<float>(in, order);
++        point.octave = read_legacy_value<int>(in, order);
++        point.response = read_legacy_value<float>(in, order);
++        point.size = read_legacy_value<float>(in, order);
++        point.pt.x = read_legacy_value<float>(in, order);
++        point.pt.y = read_legacy_value<float>(in, order);
++        info.keypoints.emplace_back(std::move(point));
++    }
++
++    const auto type = read_legacy_value<gint32>(in, order);
++    const auto rows = read_legacy_value<gint32>(in, order);
++    const auto cols = read_legacy_value<gint32>(in, order);
++    if (rows == 0) {
++        if (!((type == 0 && cols == 0) ||
++              (type == CV_32F && cols == bin::SIFT_DESCRIPTOR_COLS)))
++            throw std::runtime_error{"invalid legacy empty descriptor matrix"};
++    } else {
++        if (rows < 0 || rows > static_cast<gint32>(bin::MAX_KEYPOINTS) ||
++            cols != bin::SIFT_DESCRIPTOR_COLS || type != CV_32F ||
++            static_cast<std::size_t>(rows) * cols * sizeof(float) > in.size())
++            throw std::runtime_error{"invalid legacy descriptor matrix"};
++
++        info.descriptors.create(rows, cols, type);
++        for (gint32 row = 0; row < rows; row++)
++            for (gint32 col = 0; col < cols; col++)
++                info.descriptors.at<float>(row, col) =
++                    read_legacy_value<float>(in, order);
++    }
++
++    if (info.descriptors.rows != static_cast<int>(info.keypoints.size()))
++        throw std::runtime_error{"legacy keypoint and descriptor counts differ"};
++    return info;
++}
++
++template<typename Size>
++std::unique_ptr<SigfmImgInfo>
++try_deserialize_legacy_v1(const unsigned char* begin, const unsigned char* end,
++                          legacy_byte_order order)
++{
++    try {
++        bin::stream in{begin, end};
++        auto info = std::make_unique<SigfmImgInfo>(
++            deserialize_legacy_v1<Size>(in, order));
++        if (in.size() != 0)
++            return nullptr;
++        return info;
++    } catch (const std::exception&) {
++        return nullptr;
++    }
++}
+ } // namespace
+ 
+ unsigned char* sigfm_serialize_binary(SigfmImgInfo* info, int* outlen)
+ {
+-    bin::stream s;
+-    s << *info;
+-    const int payload = s.size();
+-    auto* out = static_cast<unsigned char*>(std::malloc(payload + 5));
+-    if (!out) {
+-        *outlen = 0;
++    if (!outlen)
++        return nullptr;
++
++    *outlen = 0;
++    try {
++        if (!info)
++            return nullptr;
++
++        bin::stream s;
++        s << *info;
++        if (s.size() > static_cast<std::size_t>(INT_MAX - 5))
++            return nullptr;
++
++        const auto payload = static_cast<int>(s.size());
++        auto* out = static_cast<unsigned char*>(std::malloc(payload + 5));
++        if (!out)
++            return nullptr;
++
++        std::memcpy(out, sigfm_blob_magic, 4);
++        out[4] = sigfm_blob_version;
++        std::memcpy(out + 5, s.data(), payload);
++        *outlen = payload + 5;
++        return out;
++    } catch (const std::exception&) {
+         return nullptr;
+     }
+-    std::memcpy(out, sigfm_blob_magic, 4);
+-    out[4] = sigfm_blob_version;
+-    unsigned char* body = s.copy_buffer();
+-    std::memcpy(out + 5, body, payload);
+-    std::free(body);
+-    *outlen = payload + 5;
+-    return out;
+ }
+ 
+ SigfmImgInfo* sigfm_deserialize_binary(const unsigned char* bytes, int len)
+ {
+     try {
+-        if (len < 5 || std::memcmp(bytes, sigfm_blob_magic, 4) != 0 ||
+-            bytes[4] != sigfm_blob_version)
++        if (!bytes || len < 5 ||
++            static_cast<std::size_t>(len) > sigfm_blob_max_size ||
++            std::memcmp(bytes, sigfm_blob_magic, 4) != 0)
++            return nullptr;
++
++        if (bytes[4] == sigfm_blob_version_legacy) {
++            auto info = try_deserialize_legacy_v1<guint64>(
++                bytes + 5, bytes + len, legacy_byte_order::little);
++            if (!info)
++                info = try_deserialize_legacy_v1<guint32>(
++                    bytes + 5, bytes + len, legacy_byte_order::little);
++            if (!info)
++                info = try_deserialize_legacy_v1<guint64>(
++                    bytes + 5, bytes + len, legacy_byte_order::big);
++            if (!info)
++                info = try_deserialize_legacy_v1<guint32>(
++                    bytes + 5, bytes + len, legacy_byte_order::big);
++            return info.release();
++        }
++        if (bytes[4] != sigfm_blob_version)
+             return nullptr;
++
+         bin::stream s{bytes + 5, bytes + len};
+         auto info = std::make_unique<SigfmImgInfo>();
+         s >> *info;
++        if (s.size() != 0)
++            return nullptr;
+         return info.release();
+     }
+     catch (const std::exception&) {
+@@ -133,7 +252,8 @@ SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height)
+         std::vector<cv::KeyPoint> pts;
+ 
+         cv::Mat descs;
+-        cv::SIFT::create()->detectAndCompute(img, roi, pts, descs);
++        cv::SIFT::create(static_cast<int>(bin::MAX_KEYPOINTS))
++            ->detectAndCompute(img, roi, pts, descs);
+ 
+         auto* info = new SigfmImgInfo{pts, descs};
+         return info;
+@@ -145,6 +265,9 @@ SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height)
+ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
+ {
+     try {
++        if (frame->descriptors.empty() || enrolled->descriptors.empty())
++            return 0;
++
+         std::vector<std::vector<cv::DMatch>> points;
+         auto bfm = cv::BFMatcher::create();
+         bfm->knnMatch(frame->descriptors, enrolled->descriptors, points, 2);
+@@ -182,9 +305,12 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
+ 
+         std::vector<angle> angles;
+         for (std::size_t j = 0; j < matches.size(); j++) {
+-            match match_1 = matches[j];
++            if (angles.size() >= max_angles)
++                break;
++
++            const auto& match_1 = matches[j];
+             for (std::size_t k = j + 1; k < matches.size(); k++) {
+-                match match_2 = matches[k];
++                const auto& match_2 = matches[k];
+ 
+                 int vec_1[2] = {match_1.p1.x - match_2.p1.x,
+                                 match_1.p1.y - match_2.p1.y};
+@@ -199,14 +325,17 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
+                     length_match) {
+ 
+                     double product = length_1 * length_2;
+-                    angles.emplace_back(angle(
++                    angles.push_back({
+                         M_PI / 2 +
+                             asin((vec_1[0] * vec_2[0] + vec_1[1] * vec_2[1]) /
+                                  product),
+                         acos((vec_1[0] * vec_2[1] - vec_1[1] * vec_2[0]) /
+                              product),
+-                        match_1, match_2));
++                    });
+                 }
++
++                if (angles.size() >= max_angles)
++                    break;
+             }
+         }
+ 
+@@ -216,9 +345,9 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
+ 
+         int count = 0;
+         for (std::size_t j = 0; j < angles.size(); j++) {
+-            angle angle_1 = angles[j];
++            const auto& angle_1 = angles[j];
+             for (std::size_t k = j + 1; k < angles.size(); k++) {
+-                angle angle_2 = angles[k];
++                const auto& angle_2 = angles[k];
+ 
+                 if (1 - std::min(angle_1.sin, angle_2.sin) /
+                                 std::max(angle_1.sin, angle_2.sin) <=
+diff --git a/libfprint/sigfm/tests.cpp b/libfprint/sigfm/tests.cpp
+index f0740cd..75fff15 100644
+--- a/libfprint/sigfm/tests.cpp
++++ b/libfprint/sigfm/tests.cpp
+@@ -20,6 +20,8 @@
+ #include<vector>
+ 
+ namespace cv {
++bool operator==(const cv::KeyPoint& lhs, const cv::KeyPoint& rhs);
++
+ bool operator==(const cv::KeyPoint& lhs, const cv::KeyPoint& rhs)
+ {
+     return lhs.angle == rhs.angle && lhs.class_id == rhs.class_id &&
+@@ -35,16 +37,6 @@ bool comp_mats(const cv::Mat& lhs, const cv::Mat& rhs)
+     return std::equal(lhs.datastart, lhs.dataend, rhs.datastart, rhs.dataend);
+ }
+ 
+-std::string to_str(const cv::KeyPoint& k)
+-{
+-    std::stringstream s;
+-    s << "angle: " << k.angle << ", class_id: " << k.class_id
+-      << ", octave: " << k.octave << ", size: " << k.size
+-      << ", reponse: " << k.response << ", ptx: " << k.pt.x
+-      << ", pty: " << k.pt.y;
+-    return s.str();
+-}
+-
+ } // namespace
+ 
+ template<typename T>
+@@ -67,19 +59,13 @@ TEST_SUITE("binary")
+         check_vec<float>({3, 2.4, 6.7});
+     }
+ 
+-    TEST_CASE("size_t can be stored and restored")
+-    {
+-        check_vec<std::size_t>({2, 5, 803, 900});
+-    }
+     TEST_CASE("number can be stored and restored")
+     {
+         check_vec<int>({5, 3, 10, 16, 24, 900});
+     }
+-    TEST_CASE("image can be stored and restored")
++    TEST_CASE("descriptor matrix can be stored and restored")
+     {
+-        cv::Mat input;
+-        input.create(256, 256, CV_8UC1);
+-        std::memcpy(input.data, embedded::capture_aes3500, 256 * 256);
++        cv::Mat input = cv::Mat::ones(2, bin::SIFT_DESCRIPTOR_COLS, CV_32F);
+         bin::stream s;
+         s << input;
+ 
+@@ -121,7 +107,7 @@ TEST_SUITE("binary")
+ 
+         cv::KeyPoint ptout;
+         s >> ptout;
+-        CHECK(to_str(pt) == to_str(ptout));
++        CHECK(pt == ptout);
+     }
+     TEST_CASE("sigfm img info can be stored and restored")
+     {
+@@ -156,6 +142,17 @@ TEST_SUITE("binary")
+         free(bin_data);
+         free(bin_data2);
+     }
++
++    TEST_CASE("invalid sigfm img info serialization fails")
++    {
++        SigfmImgInfo info;
++        info.keypoints.resize(bin::MAX_KEYPOINTS + 1);
++        int len = 7;
++
++        auto* data = sigfm_serialize_binary(&info, &len);
++        CHECK(data == nullptr);
++        CHECK(len == 0);
++    }
+ }
+ 
+ TEST_CASE("self-match outscores cross-match and matcher terminates")
+diff --git a/tests/test-fpi-print.c b/tests/test-fpi-print.c
+index c71a492..c38be59 100644
+--- a/tests/test-fpi-print.c
++++ b/tests/test-fpi-print.c
+@@ -202,6 +202,84 @@ test_sigfm_match_rejects_empty_probe (void)
+ #endif
+ }
+ 
++#ifdef HAVE_SIGFM
++static void
++write_legacy_uint32 (guchar   **cursor,
++                     guint32    value,
++                     gboolean   big_endian)
++{
++  value = big_endian ? GUINT32_TO_BE (value) : GUINT32_TO_LE (value);
++  memcpy (*cursor, &value, sizeof (value));
++  *cursor += sizeof (value);
++}
++
++static void
++write_legacy_float (guchar   **cursor,
++                    float      value,
++                    gboolean   big_endian)
++{
++  guint32 bits;
++
++  memcpy (&bits, &value, sizeof (bits));
++  write_legacy_uint32 (cursor, bits, big_endian);
++}
++
++static guchar *
++make_legacy_sigfm_blob (gsize      count_size,
++                        gboolean   big_endian,
++                        gboolean   empty,
++                        gboolean   canonical_empty,
++                        gsize     *len)
++{
++  gsize descriptor_size = empty ? 0 : 128 * sizeof (float);
++  gsize keypoint_size = empty ? 0 : 7 * sizeof (guint32);
++  guchar *blob;
++  guchar *cursor;
++
++  *len = 5 + count_size + keypoint_size + 3 * sizeof (guint32) + descriptor_size;
++  blob = g_malloc0 (*len);
++  memcpy (blob, "SGFM\1", 5);
++  cursor = blob + 5;
++
++  if (count_size == sizeof (guint64))
++    {
++      guint64 count = empty ? 0 : 1;
++
++      count = big_endian ? GUINT64_TO_BE (count) : GUINT64_TO_LE (count);
++      memcpy (cursor, &count, sizeof (count));
++      cursor += sizeof (count);
++    }
++  else
++    {
++      write_legacy_uint32 (&cursor, empty ? 0 : 1, big_endian);
++    }
++
++  if (!empty)
++    {
++      write_legacy_uint32 (&cursor, 7, big_endian);
++      write_legacy_float (&cursor, 45.5f, big_endian);
++      write_legacy_uint32 (&cursor, 2, big_endian);
++      write_legacy_float (&cursor, 0.75f, big_endian);
++      write_legacy_float (&cursor, 3.5f, big_endian);
++      write_legacy_float (&cursor, 10.25f, big_endian);
++      write_legacy_float (&cursor, 20.5f, big_endian);
++    }
++
++  write_legacy_uint32 (&cursor,
++                       empty && !canonical_empty ? 0 : 5,
++                       big_endian);
++  write_legacy_uint32 (&cursor, empty ? 0 : 1, big_endian);
++  write_legacy_uint32 (&cursor,
++                       empty && !canonical_empty ? 0 : 128,
++                       big_endian);
++  if (!empty)
++    for (guint32 col = 0; col < 128; col++)
++      write_legacy_float (&cursor, col + 0.5f, big_endian);
++
++  return blob;
++}
++#endif
++
+ static void
+ test_sigfm_blob_roundtrip_and_magic (void)
+ {
+@@ -212,16 +290,105 @@ test_sigfm_blob_roundtrip_and_magic (void)
+   int len = 0;
+   unsigned char *blob;
+   SigfmImgInfo *back;
++  g_autofree unsigned char *malformed = NULL;
++  g_autofree unsigned char *trailing = NULL;
++  guint32 one = GUINT32_TO_LE (1);
++  g_autofree guchar *legacy = NULL;
++  g_autofree guchar *legacy_v2 = NULL;
++  gsize legacy_len;
++  int legacy_v2_len = 0;
+ 
+   g_assert_nonnull (info);
+   blob = sigfm_serialize_binary (info, &len);
+   g_assert_cmpint (len, >, 5);
+   g_assert_cmpmem (blob, 4, "SGFM", 4);
+-  g_assert_cmpint (blob[4], ==, 1);
++  g_assert_cmpint (blob[4], ==, 2);
+ 
+   back = sigfm_deserialize_binary (blob, len);
+   g_assert_nonnull (back);
+   sigfm_free_info (back);
++  g_assert_null (sigfm_deserialize_binary (blob, G_MAXINT));
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint64), FALSE, FALSE, FALSE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  g_assert_cmpint (sigfm_keypoints_count (back), ==, 1);
++  legacy_v2 = sigfm_serialize_binary (back, &legacy_v2_len);
++  g_assert_nonnull (legacy_v2);
++  sigfm_free_info (back);
++  g_clear_pointer (&legacy, g_free);
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint32), FALSE, FALSE, FALSE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  g_assert_cmpint (sigfm_keypoints_count (back), ==, 1);
++  {
++    int converted_len = 0;
++    g_autofree guchar *converted = sigfm_serialize_binary (back, &converted_len);
++
++    g_assert_cmpmem (converted, converted_len, legacy_v2, legacy_v2_len);
++  }
++  sigfm_free_info (back);
++  g_clear_pointer (&legacy, g_free);
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint32), TRUE, FALSE, FALSE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  g_assert_cmpint (sigfm_keypoints_count (back), ==, 1);
++  {
++    int converted_len = 0;
++    g_autofree guchar *converted = sigfm_serialize_binary (back, &converted_len);
++
++    g_assert_cmpmem (converted, converted_len, legacy_v2, legacy_v2_len);
++  }
++  sigfm_free_info (back);
++  g_clear_pointer (&legacy, g_free);
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint64), TRUE, FALSE, FALSE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  g_assert_cmpint (sigfm_keypoints_count (back), ==, 1);
++  {
++    int converted_len = 0;
++    g_autofree guchar *converted = sigfm_serialize_binary (back, &converted_len);
++
++    g_assert_cmpmem (converted, converted_len, legacy_v2, legacy_v2_len);
++  }
++  sigfm_free_info (back);
++  g_clear_pointer (&legacy, g_free);
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint32), FALSE, TRUE, TRUE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  sigfm_free_info (back);
++  g_clear_pointer (&legacy, g_free);
++
++  legacy = make_legacy_sigfm_blob (sizeof (guint64), FALSE, TRUE, FALSE,
++                                   &legacy_len);
++  back = sigfm_deserialize_binary (legacy, legacy_len);
++  g_assert_nonnull (back);
++  sigfm_free_info (back);
++
++  /* Descriptor rows must match the keypoint count. */
++  malformed = g_malloc0 (len + 128 * sizeof (float));
++  memcpy (malformed, blob, len);
++  memcpy (malformed + 13, &one, sizeof (one));
++  g_assert_null (sigfm_deserialize_binary (malformed,
++                                          len + 128 * sizeof (float)));
++
++  trailing = g_malloc (len + 1);
++  memcpy (trailing, blob, len);
++  trailing[len] = 0;
++  g_assert_null (sigfm_deserialize_binary (trailing, len + 1));
++
++  /* An excessive keypoint count must be rejected before allocation. */
++  memset (blob + 5, 0xff, 4);
++  g_assert_null (sigfm_deserialize_binary (blob, len));
+ 
+   /* Corrupt magic: must be rejected. */
+   blob[0] = 'X';
+@@ -240,6 +407,25 @@ test_sigfm_blob_roundtrip_and_magic (void)
+ #endif
+ }
+ 
++static void
++test_sigfm_print_serialize_propagates_failure (void)
++{
++#ifdef HAVE_SIGFM
++  g_autoptr(FpPrint) print = make_print (FPI_PRINT_SIGFM);
++  g_autoptr(GError) error = NULL;
++  g_autofree guchar *data = NULL;
++  gsize length = 0;
++
++  g_ptr_array_add (print->prints, NULL);
++  g_assert_false (fp_print_serialize (print, &data, &length, &error));
++  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
++  g_assert_null (data);
++  g_assert_cmpuint (length, ==, 0);
++#else
++  g_test_skip ("SIGFM not built");
++#endif
++}
++
+ int
+ main (int argc, char *argv[])
+ {
+@@ -258,5 +444,7 @@ main (int argc, char *argv[])
+                    test_sigfm_match_rejects_empty_probe);
+   g_test_add_func ("/print/sigfm/blob_magic",
+                    test_sigfm_blob_roundtrip_and_magic);
++  g_test_add_func ("/print/sigfm/serialize_propagates_failure",
++                   test_sigfm_print_serialize_propagates_failure);
+   return g_test_run ();
+ }
+-- 
+2.56.0
+

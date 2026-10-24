@@ -1,0 +1,558 @@
+From 5df00b33c55f08851fd2f68d23f2fcd0cb784dce Mon Sep 17 00:00:00 2001
+From: Omkar Chandorkar <gotenksIN@aospa.co>
+Date: Sat, 5 Sep 2026 08:43:30 +0530
+Subject: [PATCH 6/6] packaging: Add native packages and Ubuntu CI
+
+Provide Arch Linux and Ubuntu 26.04 packaging and rollback instructions.
+Build and test Ubuntu packages in GitHub Actions, including required
+SIGFM coverage, using the distribution-provided test dependencies.
+
+Resolve release tags once, build their pinned commits, and collect
+Ubuntu packages with SHA-256 checksums for publication without
+requiring an Arch artifact.
+
+Signed-off-by: Omkar Chandorkar <gotenksIN@aospa.co>
+---
+ .github/scripts/build-arch.sh      |  49 +++++++++++++
+ .github/scripts/build-deb.sh       |  43 +++++++++++
+ .github/scripts/collect-release.sh |  26 +++++++
+ .github/workflows/build.yml        |  40 +++++++++++
+ .github/workflows/release.yml      | 111 +++++++++++++++++++++++++++++
+ packaging/ROLLBACK.md              |  21 ++++++
+ packaging/arch/PKGBUILD            |  56 +++++++++++++++
+ packaging/arch/makepkg-ascii.conf  |   7 ++
+ packaging/debian/changelog         |   5 ++
+ packaging/debian/control           |  39 ++++++++++
+ packaging/debian/copyright         |  14 ++++
+ packaging/debian/rules             |  22 ++++++
+ packaging/debian/source/format     |   1 +
+ 13 files changed, 434 insertions(+)
+ create mode 100755 .github/scripts/build-arch.sh
+ create mode 100755 .github/scripts/build-deb.sh
+ create mode 100755 .github/scripts/collect-release.sh
+ create mode 100644 .github/workflows/build.yml
+ create mode 100644 .github/workflows/release.yml
+ create mode 100644 packaging/ROLLBACK.md
+ create mode 100644 packaging/arch/PKGBUILD
+ create mode 100644 packaging/arch/makepkg-ascii.conf
+ create mode 100644 packaging/debian/changelog
+ create mode 100644 packaging/debian/control
+ create mode 100644 packaging/debian/copyright
+ create mode 100755 packaging/debian/rules
+ create mode 100644 packaging/debian/source/format
+
+diff --git a/.github/scripts/build-arch.sh b/.github/scripts/build-arch.sh
+new file mode 100755
+index 0000000..65a7dc4
+--- /dev/null
++++ b/.github/scripts/build-arch.sh
+@@ -0,0 +1,49 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++source /etc/os-release
++if [[ ${ID:-} != "arch" ]]; then
++  printf 'Container ID does not match arch\n' >&2
++  exit 2
++fi
++
++root=$(pwd -P)
++[[ -f $root/meson.build ]]
++
++pacman -Syu --noconfirm --needed \
++  base-devel git glib2 glib2-devel gobject-introspection \
++  meson ninja python-cairo python-gobject systemd doctest cairo \
++  umockdev opencv openssl pixman libgudev libgusb sudo
++
++if [[ $(id -u) -eq 0 ]]; then
++  if ! id builder >/dev/null 2>&1; then
++    useradd -m -s /bin/bash builder
++    echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
++  fi
++fi
++
++work=$(mktemp -d)
++trap 'rm -rf "$work"' EXIT
++
++pkgname=libfprint-fpc1022
++cp -a "$root/packaging/arch/"* "$work/"
++mkdir -p "$work/archive/$pkgname"
++tar -C "$root" --exclude=.git --exclude=artifacts -cf - . |
++  tar -C "$work/archive/$pkgname" -xf -
++tar -C "$work/archive" -cf "$work/$pkgname.tar" "$pkgname"
++rm -rf "$work/archive"
++sed -i "s|^source=.*|source=('$pkgname.tar')|" "$work/PKGBUILD"
++
++chown -R builder:builder "$work"
++
++(
++  cd "$work"
++  sudo -u builder makepkg --config "$work/makepkg-ascii.conf" --noconfirm -s
++)
++
++out="$root/artifacts/arch"
++mkdir -p "$out"
++package=$(find "$work" -maxdepth 1 \
++  -name 'libfprint-fpc1022-[0-9]*-x86_64.pkg.tar.*' -print -quit)
++[[ -n $package ]]
++cp "$package" "$out/"
+diff --git a/.github/scripts/build-deb.sh b/.github/scripts/build-deb.sh
+new file mode 100755
+index 0000000..92f4f4f
+--- /dev/null
++++ b/.github/scripts/build-deb.sh
+@@ -0,0 +1,43 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++source /etc/os-release
++case ${DISTRO_FAMILY:-} in
++  ubuntu) ;;
++  *) printf 'Unsupported DISTRO_FAMILY: %s\n' "${DISTRO_FAMILY:-unset}" >&2; exit 2 ;;
++esac
++
++if [[ ${ID:-} != "$DISTRO_FAMILY" ]]; then
++  printf 'Container ID does not match DISTRO_FAMILY\n' >&2
++  exit 2
++fi
++root=$(pwd -P)
++DISTRO_ID="${ID}-${VERSION_ID}"
++[[ -f $root/meson.build ]]
++export DEBIAN_FRONTEND=noninteractive
++apt-get update
++apt-get install -y --no-install-recommends \
++  build-essential cmake debhelper doctest-dev dpkg-dev git gobject-introspection \
++  libcairo2-dev libglib2.0-dev libgudev-1.0-dev libgusb-dev libopencv-dev \
++  libpixman-1-dev libssl-dev libudev-dev meson ninja-build pkgconf \
++  python3 python3-cairo python3-gi udev umockdev
++if apt-cache show systemd-dev >/dev/null 2>&1; then
++  apt-get install -y --no-install-recommends systemd-dev
++fi
++
++work=$(mktemp -d)
++trap 'rm -rf "$work"' EXIT
++mkdir -p "$work/source"
++tar -C "$root" --exclude=.git --exclude=artifacts -cf - . |
++  tar -x -C "$work/source"
++cp -a "$work/source/packaging/debian" "$work/source/debian"
++(
++  cd "$work/source"
++  dpkg-buildpackage -us -uc -b
++)
++
++out="$root/artifacts/$DISTRO_ID"
++mkdir -p "$out"
++package=$(find "$work" -maxdepth 1 -name 'libfprint-fpc1022_*_amd64.deb' -print -quit)
++[[ -n $package ]]
++cp "$package" "$out/"
+diff --git a/.github/scripts/collect-release.sh b/.github/scripts/collect-release.sh
+new file mode 100755
+index 0000000..176a892
+--- /dev/null
++++ b/.github/scripts/collect-release.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++input=${1:?usage: collect-release.sh ARTIFACT_DIR RELEASE_DIR}
++output=${2:?usage: collect-release.sh ARTIFACT_DIR RELEASE_DIR}
++mkdir -p "$output"
++
++while IFS= read -r file; do
++  basename=$(basename "$file")
++  [[ ! -e "$output/$basename" ]] || {
++    printf 'Duplicate artifact: %s\n' "$basename" >&2
++    exit 1
++  }
++  cp "$file" "$output/$basename"
++done < <(find "$input" -type f \( -name '*.deb' -o -name '*.pkg.tar.*' \) | LC_ALL=C sort)
++
++[[ $(find "$output" -maxdepth 1 -name '*.deb' | wc -l) -eq 1 ]]
++
++(
++  cd "$output"
++  mapfile -t files < <(
++    find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' |
++      LC_ALL=C sort
++  )
++  sha256sum "${files[@]}" > SHA256SUMS
++)
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+new file mode 100644
+index 0000000..97518e2
+--- /dev/null
++++ b/.github/workflows/build.yml
+@@ -0,0 +1,40 @@
++name: Build packages
++
++on:
++  workflow_dispatch:
++  push:
++    branches: [ main ]
++  pull_request:
++    branches: [ main ]
++
++concurrency:
++  group: build-${{ github.ref }}
++  cancel-in-progress: false
++
++permissions:
++  contents: read
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - family: ubuntu
++            image: ubuntu:26.04
++            script: build-deb.sh
++    container:
++      image: ${{ matrix.image }}
++    env:
++      DISTRO_FAMILY: ${{ matrix.family }}
++    steps:
++      - uses: actions/checkout@v7
++      - name: Build native package
++        run: bash ".github/scripts/${{ matrix.script }}"
++      - uses: actions/upload-artifact@v7
++        with:
++          name: ${{ matrix.family }}
++          path: artifacts
++          retention-days: 7
++          if-no-files-found: error
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+new file mode 100644
+index 0000000..6f6a1e7
+--- /dev/null
++++ b/.github/workflows/release.yml
+@@ -0,0 +1,111 @@
++name: Publish release
++
++on:
++  push:
++    tags:
++      - 'v*.*.*'
++  workflow_dispatch:
++    inputs:
++      tag:
++        description: Release tag (required when the selected ref is a branch)
++        required: false
++        type: string
++
++concurrency:
++  group: release-${{ github.ref }}
++  cancel-in-progress: false
++
++permissions:
++  contents: read
++
++jobs:
++  prepare:
++    runs-on: ubuntu-latest
++    outputs:
++      tag: ${{ steps.meta.outputs.tag }}
++      commit: ${{ steps.commit.outputs.commit }}
++    steps:
++      - name: Resolve release tag
++        id: meta
++        shell: bash
++        env:
++          INPUT_TAG: ${{ inputs.tag }}
++        run: |
++          tag="$INPUT_TAG"
++          if [[ -z "$tag" && "$GITHUB_REF_TYPE" == "tag" ]]; then
++            tag="$GITHUB_REF_NAME"
++          fi
++          if [[ -z "$tag" ]]; then
++            echo 'Specify a release tag when dispatching from a branch.' >&2
++            exit 1
++          fi
++          git check-ref-format "refs/tags/$tag"
++          echo "tag=$tag" >> "$GITHUB_OUTPUT"
++      - uses: actions/checkout@v7
++        with:
++          ref: refs/tags/${{ steps.meta.outputs.tag }}
++      - name: Pin release commit
++        id: commit
++        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
++
++  build:
++    needs: prepare
++    runs-on: ubuntu-latest
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - family: ubuntu
++            image: ubuntu:26.04
++            script: build-deb.sh
++    container:
++      image: ${{ matrix.image }}
++    env:
++      DISTRO_FAMILY: ${{ matrix.family }}
++    steps:
++      - uses: actions/checkout@v7
++        with:
++          ref: ${{ needs.prepare.outputs.commit }}
++      - name: Build native package
++        run: bash ".github/scripts/${{ matrix.script }}"
++      - uses: actions/upload-artifact@v7
++        with:
++          name: ${{ matrix.family }}
++          path: artifacts
++          if-no-files-found: error
++
++  release:
++    needs: [prepare, build]
++    runs-on: ubuntu-latest
++    permissions:
++      contents: write
++    steps:
++      - uses: actions/checkout@v7
++        with:
++          ref: ${{ needs.prepare.outputs.commit }}
++      - uses: actions/download-artifact@v8
++        with:
++          path: artifacts
++      - name: Collect artifacts
++        run: |
++          .github/scripts/collect-release.sh artifacts release
++          test -f release/SHA256SUMS
++      - name: Ensure release exists
++        env:
++          GH_TOKEN: ${{ github.token }}
++          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
++        run: |
++          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
++            gh release create "$RELEASE_TAG" \
++              --repo "$GITHUB_REPOSITORY" \
++              --title "libfprint-fpc1022 $RELEASE_TAG" \
++              --generate-notes \
++              --verify-tag
++          fi
++      - name: Upload release assets
++        env:
++          GH_TOKEN: ${{ github.token }}
++          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
++        run: |
++          gh release upload "$RELEASE_TAG" release/* \
++            --repo "$GITHUB_REPOSITORY"
+diff --git a/packaging/ROLLBACK.md b/packaging/ROLLBACK.md
+new file mode 100644
+index 0000000..f003ddb
+--- /dev/null
++++ b/packaging/ROLLBACK.md
+@@ -0,0 +1,21 @@
++# FPC1022 driver rollback
++
++## Ubuntu
++
++```bash
++sudo apt remove libfprint-fpc1022
++sudo apt install libfprint-2-2 fprintd
++sudo systemctl restart fprintd.service
++```
++
++## Arch Linux
++
++```bash
++sudo pacman -S libfprint
++sudo systemctl restart fprintd.service
++```
++
++Do not enable fingerprint authentication in PAM unless both
++`fprintd-enroll` and repeated `fprintd-verify` scans succeed. If PAM has
++subsequently been configured, restore its backed-up files before removing a
++working fingerprint setup.
+diff --git a/packaging/arch/PKGBUILD b/packaging/arch/PKGBUILD
+new file mode 100644
+index 0000000..057974f
+--- /dev/null
++++ b/packaging/arch/PKGBUILD
+@@ -0,0 +1,56 @@
++# Maintainer: Omkar Chandorkar <gotenksIN@aospa.co>
++
++pkgname=libfprint-fpc1022
++pkgver=1.94.100
++pkgrel=1
++pkgdesc='libfprint with FPC1022/Disum 10a5:9200 support'
++arch=('x86_64')
++url='https://github.com/gotenksIN/libfprint-fpc-disum'
++license=('LGPL-2.1-or-later')
++groups=('fprint')
++depends=(
++  'glib2'
++  'glibc'
++  'libgcc'
++  'libgudev'
++  'libgusb'
++  'libstdc++'
++  'opencv'
++  'openssl'
++  'pixman'
++)
++makedepends=(
++  'git'
++  'glib2-devel'
++  'gobject-introspection'
++  'meson'
++  'ninja'
++  'python-cairo'
++  'python-gobject'
++  'systemd'
++  'doctest'
++)
++checkdepends=('cairo' 'umockdev')
++optdepends=('fprintd: D-Bus daemon and PAM module for fingerprint readers')
++provides=('libfprint=1.94.100' 'libfprint-2.so')
++conflicts=('libfprint')
++source=("$pkgname::git+https://github.com/gotenksIN/libfprint-fpc-disum.git#tag=v$pkgver")
++sha256sums=('SKIP')
++
++build() {
++  arch-meson "$srcdir/$pkgname" build \
++    -D drivers=all \
++    -D doc=false \
++    -D installed-tests=false \
++    -D udev_hwdb=enabled
++  meson compile -C build
++}
++
++check() {
++  meson test -C build --print-errorlogs --no-suite libfprint:data
++  meson test -C build --print-errorlogs udev-hwdb
++}
++
++package() {
++  DESTDIR="$pkgdir" meson install -C build
++}
+diff --git a/packaging/arch/makepkg-ascii.conf b/packaging/arch/makepkg-ascii.conf
+new file mode 100644
+index 0000000..69e16ec
+--- /dev/null
++++ b/packaging/arch/makepkg-ascii.conf
+@@ -0,0 +1,7 @@
++#!/usr/bin/env bash
++
++source /etc/makepkg.conf
++
++# umockdev cannot replay USB captures when their absolute path contains
++# non-ASCII characters. Keep makepkg's source and build trees under /tmp.
++BUILDDIR="/tmp/libfprint-build-${USER}"
+diff --git a/packaging/debian/changelog b/packaging/debian/changelog
+new file mode 100644
+index 0000000..8ad584d
+--- /dev/null
++++ b/packaging/debian/changelog
+@@ -0,0 +1,5 @@
++libfprint-fpc1022 (1.94.100) unstable; urgency=medium
++
++  * Add fpc1022 driver for FPC Disum match-on-host sensors (10a5:9200).
++
++ -- Omkar Chandorkar <gotenksIN@aospa.co>  Fri, 04 Sep 2026 12:00:00 +0000
+diff --git a/packaging/debian/control b/packaging/debian/control
+new file mode 100644
+index 0000000..99f0e8a
+--- /dev/null
++++ b/packaging/debian/control
+@@ -0,0 +1,39 @@
++Source: libfprint-fpc1022
++Section: libs
++Priority: optional
++Maintainer: Omkar Chandorkar <gotenksIN@aospa.co>
++Build-Depends:
++ cmake,
++ debhelper-compat (= 13),
++ doctest-dev,
++ gobject-introspection,
++ libcairo2-dev,
++ libglib2.0-dev,
++ libgudev-1.0-dev,
++ libgusb-dev,
++ libopencv-dev,
++ libpixman-1-dev,
++ libssl-dev,
++ libudev-dev,
++ meson,
++ ninja-build,
++ pkgconf,
++ python3,
++ python3-cairo,
++ python3-gi,
++ udev,
++ umockdev
++Standards-Version: 4.7.0
++Homepage: https://github.com/gotenksIN/libfprint-fpc-disum
++Rules-Requires-Root: no
++
++Package: libfprint-fpc1022
++Architecture: amd64
++Depends: ${shlibs:Depends}, ${misc:Depends}
++Provides: libfprint-2-2 (= 1:1.94.100), libfprint-2-dev, gir1.2-fprint-2.0
++Conflicts: libfprint-2-2, libfprint-2-dev, gir1.2-fprint-2.0
++Replaces: libfprint-2-2, libfprint-2-dev, gir1.2-fprint-2.0
++Suggests: fprintd
++Description: libfprint build with FPC1022 (10a5:9200) support
++ This libfprint build includes all standard upstream drivers plus the
++ fpc1022 driver for Fingerprint Cards DISUM match-on-host sensors.
+diff --git a/packaging/debian/copyright b/packaging/debian/copyright
+new file mode 100644
+index 0000000..95867e4
+--- /dev/null
++++ b/packaging/debian/copyright
+@@ -0,0 +1,14 @@
++Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
++Upstream-Name: libfprint
++Source: https://github.com/gotenksIN/libfprint-fpc-disum
++
++Files: *
++Copyright: libfprint contributors
++License: LGPL-2.1+
++ This package is free software; you can redistribute it and/or modify
++ it under the terms of the GNU Lesser General Public License as published
++ by the Free Software Foundation; either version 2.1 of the License, or
++ (at your option) any later version.
++ .
++ On Debian systems, the complete text of the GNU Lesser General Public
++ License version 2.1 is available in /usr/share/common-licenses/LGPL-2.1.
+diff --git a/packaging/debian/rules b/packaging/debian/rules
+new file mode 100755
+index 0000000..6210e88
+--- /dev/null
++++ b/packaging/debian/rules
+@@ -0,0 +1,22 @@
++#!/usr/bin/make -f
++
++export DEB_BUILD_MAINT_OPTIONS = hardening=+all
++
++%:
++	dh $@ --buildsystem=meson
++
++override_dh_auto_configure:
++	dh_auto_configure -- \
++		-Ddrivers=all \
++		-Ddoc=false \
++		-Dinstalled-tests=false \
++		-Dudev_hwdb=enabled \
++		-Dudev_rules_dir=/usr/lib/udev/rules.d \
++		-Dudev_hwdb_dir=/usr/lib/udev/hwdb.d
++
++override_dh_auto_test:
++	meson compile -C obj-$$(dpkg-architecture -qDEB_HOST_GNU_TYPE) sigfm-tests
++	meson test -C obj-$$(dpkg-architecture -qDEB_HOST_GNU_TYPE) --print-errorlogs \
++		--no-suite libfprint:data
++	meson test -C obj-$$(dpkg-architecture -qDEB_HOST_GNU_TYPE) --print-errorlogs \
++		udev-hwdb
+diff --git a/packaging/debian/source/format b/packaging/debian/source/format
+new file mode 100644
+index 0000000..89ae9db
+--- /dev/null
++++ b/packaging/debian/source/format
+@@ -0,0 +1 @@
++3.0 (native)
+-- 
+2.56.0
+

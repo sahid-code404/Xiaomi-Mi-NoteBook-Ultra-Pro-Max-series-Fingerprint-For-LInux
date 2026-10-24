@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Fingerprint Driver Installer
+# Target Sensor: FPC1022 (USB ID 10a5:9200) Match-on-Host Fingerprint Reader
+# Author: Sahidul Haque (sahid-code404) & Contributors
+# ==============================================================================
+
+set -euo pipefail
+
+# ANSI color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_USER="${SUDO_USER:-$USER}"
+
+BUILD_MODE=false
+ASSUME_YES=false
+
+print_banner() {
+    cat << "EOF"
+==============================================================================
+   _  ___                     _   __ __    _    ___     _                 
+  | |/ (_)__ _ ___  __ _  ___(_) / // /__ (_)  / _ \___(_)_  _____ ____   
+  | ' < / _ `/ _ \/  ' \/ -_)_  / _  / _ `/ /  / // / __/ / |/ / -_) __/   
+ |_|\_\_\_,_/\___/_/_/_/\__(_) /_//_/\_,_/_/  /____/_/ /_/|___/\__/_/      
+ Xiaomi Mi NoteBook Ultra / Pro / Max - FPC1022 Fingerprint Driver Installer
+==============================================================================
+EOF
+}
+
+show_help() {
+    cat << EOF
+Usage: sudo ./install.sh [OPTIONS]
+
+Options:
+  -b, --build     Build driver from source instead of installing pre-compiled binaries
+  -y, --yes       Automatic yes to prompts; run non-interactively
+  -h, --help      Display this help message and exit
+
+Supported Distributions:
+  - Fedora Linux (Workstation 39, 40, 41, 42, 45, etc.) / RHEL / CentOS
+  - Ubuntu (22.04 LTS, 24.04 LTS, 26.04) / Debian / Pop!_OS / Linux Mint
+  - Arch Linux / Manjaro / EndeavourOS
+EOF
+}
+
+# Parse command line flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -b|--build)
+            BUILD_MODE=true
+            shift
+            ;;
+        -y|--yes)
+            ASSUME_YES=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}[ERROR] Unknown option: $1${NC}" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Root privilege check
+check_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo -e "${RED}${BOLD}[ERROR] This installer must be executed as root.${NC}" >&2
+        echo -e "Please re-run using: ${GREEN}sudo $0 $*${NC}" >&2
+        exit 1
+    fi
+}
+
+# Hardware verification
+check_hardware() {
+    echo -e "${BLUE}[*] Checking for FPC1022 fingerprint sensor...${NC}"
+    if lsusb -d 10a5:9200 >/dev/null 2>&1; then
+        echo -e "${GREEN}[✔] Detected FPC1022 fingerprint sensor: $(lsusb -d 10a5:9200)${NC}"
+    else
+        echo -e "${YELLOW}[!] WARNING: Sensor '10a5:9200' was not found in lsusb.${NC}"
+        echo -e "${YELLOW}    Please make sure the fingerprint sensor is enabled in your BIOS/UEFI.${NC}"
+        if [[ "$ASSUME_YES" != "true" ]]; then
+            read -r -p "Do you still want to proceed with driver installation? [y/N]: " resp
+            if [[ ! "$resp" =~ ^[yY]([eE][sS])?$ ]]; then
+                echo "Installation cancelled."
+                exit 0
+            fi
+        fi
+    fi
+}
+
+# Distribution detection
+detect_distro() {
+    if [[ ! -f /etc/os-release ]]; then
+        echo -e "${RED}[ERROR] Cannot detect Linux distribution (/etc/os-release missing).${NC}" >&2
+        exit 1
+    fi
+
+    # Source os-release
+    . /etc/os-release
+    DISTRO_ID="${ID:-unknown}"
+    DISTRO_LIKE="${ID_LIKE:-}"
+    echo -e "${BLUE}[*] Detected Distribution: ${BOLD}${PRETTY_NAME:-$DISTRO_ID}${NC}"
+}
+
+# Fedora / RHEL installation
+install_fedora() {
+    echo -e "${BLUE}[*] Preparing installation for Fedora/RHEL...${NC}"
+    
+    # Ensure fprintd and fprintd-pam packages are present
+    if ! rpm -q fprintd >/dev/null 2>&1 || ! rpm -q fprintd-pam >/dev/null 2>&1; then
+        echo -e "${BLUE}[*] Installing fprintd and fprintd-pam packages...${NC}"
+        dnf install -y fprintd fprintd-pam
+    fi
+
+    if [[ "$BUILD_MODE" == "true" ]]; then
+        echo -e "${BLUE}[*] Source build mode requested...${NC}"
+        install_from_source_fedora
+        return
+    fi
+
+    echo -e "${BLUE}[*] Installing pre-compiled FPC1022 libfprint with SIGFM matcher...${NC}"
+    
+    FEDORA_PKG_DIR="$SCRIPT_DIR/packages/fedora"
+    DEPS_DIR="/usr/local/lib64/fprint-deps"
+    TARGET_LIB="/usr/lib64/libfprint-2.so.2.0.0"
+    BACKUP_LIB="/usr/lib64/libfprint-2.so.2.0.0.stock-backup"
+
+    if [[ ! -f "$FEDORA_PKG_DIR/libfprint-2.so.2.0.0" ]]; then
+        echo -e "${RED}[ERROR] Fedora pre-compiled binary missing at $FEDORA_PKG_DIR/libfprint-2.so.2.0.0${NC}" >&2
+        echo -e "${YELLOW}Falling back to building from source...${NC}"
+        install_from_source_fedora
+        return
+    fi
+
+    # Backup stock Fedora libfprint library if not already backed up
+    if [[ -f "$TARGET_LIB" && ! -f "$BACKUP_LIB" ]]; then
+        echo -e "${BLUE}[*] Backing up stock system libfprint to ${BACKUP_LIB}...${NC}"
+        cp -p "$TARGET_LIB" "$BACKUP_LIB"
+    fi
+
+    # Set up OpenCV / SIGFM dependency directory
+    mkdir -p "$DEPS_DIR"
+    echo -e "${BLUE}[*] Deploying runtime dependencies to ${DEPS_DIR}...${NC}"
+    cp -p "$FEDORA_PKG_DIR/fprint-deps/"*.so.* "$DEPS_DIR/"
+
+    # Create dependency symlinks
+    (
+        cd "$DEPS_DIR"
+        ln -sf libblas.so.3.12.1 libblas.so.3
+        ln -sf libblas.so.3 libblas.so
+        ln -sf libgfortran.so.5.0.0 libgfortran.so.5
+        ln -sf libgfortran.so.5 libgfortran.so
+        ln -sf liblapack.so.3.12.1 liblapack.so.3
+        ln -sf liblapack.so.3 liblapack.so
+        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410
+        ln -sf libopencv_core.so.410 libopencv_core.so
+        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410
+        ln -sf libopencv_features2d.so.410 libopencv_features2d.so
+        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410
+        ln -sf libopencv_flann.so.410 libopencv_flann.so
+        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410
+        ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
+        ln -sf libtbb.so.12.17 libtbb.so.12
+        ln -sf libtbb.so.12 libtbb.so
+        
+        # Link host system crypto and ssl
+        if [[ -f /lib64/libcrypto.so.3 ]]; then
+            ln -sf /lib64/libcrypto.so.3 libcrypto.so
+        fi
+        if [[ -f /lib64/libssl.so.3 ]]; then
+            ln -sf /lib64/libssl.so.3 libssl.so
+        fi
+    )
+
+    # Configure dynamic linker ld.so.conf.d
+    echo "$DEPS_DIR" > /etc/ld.so.conf.d/fprint.conf
+
+    # Deploy patched libfprint
+    echo -e "${BLUE}[*] Installing driver library to /usr/lib64/...${NC}"
+    cp -p "$FEDORA_PKG_DIR/libfprint-2.so.2.0.0" "$TARGET_LIB"
+    ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
+
+    # SELinux Permissions
+    if command -v chcon >/dev/null 2>&1; then
+        echo -e "${BLUE}[*] Configuring SELinux file contexts (lib_t)...${NC}"
+        chcon -t lib_t /usr/lib64/libfprint-2.so* 2>/dev/null || true
+        chcon -R -t lib_t "$DEPS_DIR" 2>/dev/null || true
+    fi
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v /usr/lib64/libfprint-2.so* 2>/dev/null || true
+        restorecon -Rv "$DEPS_DIR" 2>/dev/null || true
+    fi
+
+    # Update ldconfig
+    ldconfig
+
+    # Protect package from being overwritten by dnf upgrade
+    protect_dnf_packages
+}
+
+# Protect libfprint from dnf upgrade
+protect_dnf_packages() {
+    local dnf_conf="/etc/dnf/dnf.conf"
+    if [[ -f "$dnf_conf" ]]; then
+        echo -e "${BLUE}[*] Protecting libfprint from DNF system upgrades...${NC}"
+        if grep -q "^excludepkgs=" "$dnf_conf"; then
+            if ! grep -q "libfprint\*" "$dnf_conf"; then
+                sed -i 's/^excludepkgs=\(.*\)/excludepkgs=\1 libfprint*/' "$dnf_conf"
+                echo -e "${GREEN}[✔] Appended libfprint* to excludepkgs in $dnf_conf${NC}"
+            else
+                echo -e "${GREEN}[✔] DNF excludepkgs already configured for libfprint*.${NC}"
+            fi
+        else
+            if grep -q "^\[main\]" "$dnf_conf"; then
+                sed -i '/^\[main\]/a excludepkgs=libfprint*' "$dnf_conf"
+            else
+                echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
+            fi
+            echo -e "${GREEN}[✔] Added excludepkgs=libfprint* to $dnf_conf${NC}"
+        fi
+    fi
+}
+
+# Ubuntu / Debian installation
+install_ubuntu_debian() {
+    echo -e "${BLUE}[*] Preparing installation for Ubuntu/Debian...${NC}"
+    
+    if [[ "$BUILD_MODE" == "true" ]]; then
+        install_from_source_debian
+        return
+    fi
+
+    local deb_pkg="$SCRIPT_DIR/packages/deb/libfprint-fpc1022_1.94.100_amd64.deb"
+    if [[ -f "$deb_pkg" ]]; then
+        echo -e "${BLUE}[*] Installing pre-compiled Debian package...${NC}"
+        apt-get update -y
+        apt-get install -y "$deb_pkg" fprintd
+        
+        # Hold package to prevent apt upgrades from overwriting it
+        echo -e "${BLUE}[*] Locking package in APT...${NC}"
+        apt-mark hold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
+    else
+        echo -e "${YELLOW}[!] Deb package not found at $deb_pkg. Building from source...${NC}"
+        install_from_source_debian
+    fi
+
+    # Enable PAM authentication
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        echo -e "${BLUE}[*] Enabling PAM fingerprint authentication...${NC}"
+        pam-auth-update --enable fingerprint 2>/dev/null || true
+    fi
+}
+
+# Arch Linux installation
+install_arch() {
+    echo -e "${BLUE}[*] Preparing installation for Arch Linux...${NC}"
+
+    local arch_pkg="$SCRIPT_DIR/packages/arch/libfprint-fpc1022-1.94.100-1-x86_64.pkg.tar.zst"
+    if [[ "$BUILD_MODE" != "true" && -f "$arch_pkg" ]]; then
+        echo -e "${BLUE}[*] Installing pre-compiled Arch package...${NC}"
+        pacman -S --needed --noconfirm fprintd
+        pacman -U --noconfirm "$arch_pkg"
+
+        # Add IgnorePkg to /etc/pacman.conf if not already present
+        if [[ -f /etc/pacman.conf ]]; then
+            if grep -q "^IgnorePkg" /etc/pacman.conf; then
+                if ! grep -q "libfprint" /etc/pacman.conf; then
+                    sed -i 's/^IgnorePkg[ ]*=[ ]*\(.*\)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
+                fi
+            else
+                sed -i '/^\[options\]/a IgnorePkg = libfprint' /etc/pacman.conf
+            fi
+            echo -e "${GREEN}[✔] Added libfprint to IgnorePkg in /etc/pacman.conf${NC}"
+        fi
+    else
+        echo -e "${BLUE}[*] Building via PKGBUILD...${NC}"
+        pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl libgudev polkit doctest opencv fprintd
+        BUILD_DIR="/tmp/fpc1022_arch_build"
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        cp -r "$SCRIPT_DIR/src/libfprint" "$BUILD_DIR/src"
+        (
+            cd "$BUILD_DIR/src"
+            meson setup build -Ddrivers=fpc1022 -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+            ninja -C build
+            ninja -C build install
+        )
+        rm -rf "$BUILD_DIR"
+    fi
+}
+
+# Source build for Fedora
+install_from_source_fedora() {
+    echo -e "${BLUE}[*] Installing build dependencies via DNF...${NC}"
+    dnf install -y meson ninja-build gcc gcc-c++ glib2-devel libgusb-devel pixman-devel openssl-devel libgudev-devel polkit-devel systemd-devel doctest-devel opencv-devel fprintd fprintd-pam
+    
+    local src_dir="$SCRIPT_DIR/src/libfprint"
+    if [[ ! -d "$src_dir" ]]; then
+        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
+    local bdir="$src_dir/build"
+    rm -rf "$bdir"
+    meson setup "$bdir" "$src_dir" -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+    ninja -C "$bdir"
+    echo -e "${BLUE}[*] Installing compiled driver...${NC}"
+    ninja -C "$bdir" install
+    ldconfig
+    protect_dnf_packages
+}
+
+# Source build for Debian/Ubuntu
+install_from_source_debian() {
+    echo -e "${BLUE}[*] Installing build dependencies via APT...${NC}"
+    apt-get update -y
+    apt-get install -y meson ninja-build build-essential libglib2.0-dev libgusb-dev libpixman-1-dev libssl-dev libgudev-1.0-dev libpolkit-gobject-1-dev doctest-dev libopencv-dev fprintd
+    
+    local src_dir="$SCRIPT_DIR/src/libfprint"
+    local bdir="$src_dir/build"
+    rm -rf "$bdir"
+    meson setup "$bdir" "$src_dir" -Ddrivers=fpc1022 -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+    ninja -C "$bdir"
+    ninja -C "$bdir" install
+    ldconfig
+}
+
+# Post-install service reload and validation
+finalize_installation() {
+    echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
+    udevadm control --reload 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
+    
+    systemctl restart fprintd.service || {
+        echo -e "${YELLOW}[!] Warning: fprintd.service restart returned non-zero, checking status...${NC}"
+    }
+    
+    sleep 1
+
+    # Optional authselect configuration for Fedora
+    if command -v authselect >/dev/null 2>&1; then
+        if ! authselect current | grep -q "with-fingerprint"; then
+            echo -e "${BLUE}[*] Enabling fingerprint auth in authselect...${NC}"
+            authselect enable-feature with-fingerprint 2>/dev/null || true
+            authselect apply-changes 2>/dev/null || true
+        fi
+    fi
+
+    echo ""
+    echo -e "${GREEN}==============================================================================${NC}"
+    echo -e "${GREEN}${BOLD}     [✔] FPC1022 FINGERPRINT DRIVER INSTALLED SUCCESSFULLY!${NC}"
+    echo -e "${GREEN}==============================================================================${NC}"
+    echo ""
+    echo -e "${BOLD}Next Steps for Enrollment & Verification:${NC}"
+    echo -e "  1. Enroll a finger for your user (${BOLD}${TARGET_USER}${NC}):"
+    echo -e "     ${CYAN}fprintd-enroll ${TARGET_USER}${NC}"
+    echo -e "     (or specific finger: ${CYAN}fprintd-enroll -f right-index-finger ${TARGET_USER}${NC})"
+    echo ""
+    echo -e "  2. Test and verify your enrolled fingerprint:"
+    echo -e "     ${CYAN}fprintd-verify ${TARGET_USER}${NC}"
+    echo ""
+    echo -e "  3. Desktop GUI Integration:"
+    echo -e "     - ${BOLD}GNOME:${NC} Settings -> Users -> Fingerprint Login"
+    echo -e "     - ${BOLD}KDE:${NC} System Settings -> Users -> Fingerprint"
+    echo ""
+    echo -e "  4. Need to revert? Simply run:"
+    echo -e "     ${CYAN}sudo ./uninstall.sh${NC}"
+    echo ""
+}
+
+# Main script flow
+main() {
+    print_banner
+    check_root
+    check_hardware
+    detect_distro
+
+    case "$DISTRO_ID" in
+        fedora|rhel|centos)
+            install_fedora
+            ;;
+        ubuntu|debian|linuxmint|pop)
+            install_ubuntu_debian
+            ;;
+        arch|manjaro|endeavouros)
+            install_arch
+            ;;
+        *)
+            if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
+                install_fedora
+            elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]]; then
+                install_ubuntu_debian
+            elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
+                install_arch
+            else
+                echo -e "${YELLOW}[!] Unrecognized distribution '$DISTRO_ID'. Falling back to source build...${NC}"
+                install_from_source_debian
+            fi
+            ;;
+    esac
+
+    finalize_installation
+}
+
+main "$@"
