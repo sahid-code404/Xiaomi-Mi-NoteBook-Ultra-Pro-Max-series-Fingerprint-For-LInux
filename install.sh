@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Fingerprint Driver Installer
+# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Fingerprint & Power Button Installer
 # Target Sensor: FPC1022 (USB ID 10a5:9200) Match-on-Host Fingerprint Reader
 # Author: Sahidul Haque (sahid-code404) & Contributors
 # ==============================================================================
@@ -32,7 +32,7 @@ print_banner() {
   | |/ (_)__ _ ___  __ _  ___(_) / // /__ (_)  / _ \___(_)_  _____ ____   
   | ' < / _ `/ _ \/  ' \/ -_)_  / _  / _ `/ /  / // / __/ / |/ / -_) __/   
  |_|\_\_\_,_/\___/_/_/_/\__(_) /_//_/\_,_/_/  /____/_/ /_/|___/\__/_/      
- Xiaomi Mi NoteBook Ultra / Pro / Max - FPC1022 Fingerprint Driver Installer
+ Xiaomi Mi NoteBook Ultra / Pro / Max - Unified Driver & Power Button Fix
 ==============================================================================
 EOF
 }
@@ -426,6 +426,68 @@ install_from_source_arch() {
     protect_arch_packages
 }
 
+# Configure power button handling to prevent accidental suspend on sensor touch
+configure_power_button() {
+    echo -e "${BLUE}[*] Configuring power button handling (coexistence with fingerprint sensor)...${NC}"
+    
+    # 1. Systemd logind configuration
+    local logind_conf_dir="/etc/systemd/logind.conf.d"
+    local power_conf="$SCRIPT_DIR/configs/10-power-button.conf"
+    
+    if [[ -f "$power_conf" ]]; then
+        mkdir -p "$logind_conf_dir"
+        echo -e "${BLUE}[*] Installing logind power button policy to ${logind_conf_dir}/10-power-button.conf...${NC}"
+        cp -p "$power_conf" "$logind_conf_dir/10-power-button.conf"
+        
+        # Reload systemd-logind to pick up new configuration without dropping active sessions
+        if command -v systemctl >/dev/null 2>&1; then
+            echo -e "${BLUE}[*] Reloading systemd-logind...${NC}"
+            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || systemctl restart systemd-logind 2>/dev/null || true
+        fi
+        echo -e "${GREEN}[✔] Systemd logind power button handling configured.${NC}"
+    else
+        echo -e "${YELLOW}[!] Warning: $power_conf not found, skipping logind configuration.${NC}"
+    fi
+
+    # 2. Add target user to input group for direct power button & input event access
+    if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
+        echo -e "${BLUE}[*] Adding user '${TARGET_USER}' to the 'input' group...${NC}"
+        usermod -a -G input "$TARGET_USER" 2>/dev/null || true
+        echo -e "${GREEN}[✔] Added ${TARGET_USER} to input group.${NC}"
+    fi
+
+    # 3. GNOME power button action (set to 'interactive' to show power menu instead of suspend)
+    local dconf_dir="/etc/dconf/db/local.d"
+    mkdir -p "$dconf_dir"
+    cat > "$dconf_dir/01-power-button" << 'EOF'
+[org/gnome/settings-daemon/plugins/power]
+power-button-action='interactive'
+EOF
+    echo -e "${GREEN}[✔] Created GNOME system-wide power button setting in ${dconf_dir}/01-power-button${NC}"
+
+    if command -v dconf >/dev/null 2>&1; then
+        echo -e "${BLUE}[*] Updating dconf database...${NC}"
+        dconf update 2>/dev/null || true
+        echo -e "${GREEN}[✔] dconf database updated.${NC}"
+    fi
+
+    # Also apply directly to active user session if running GNOME
+    if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]] && command -v gsettings >/dev/null 2>&1; then
+        local user_uid
+        user_uid="$(id -u "$TARGET_USER" 2>/dev/null || echo "")"
+        if [[ -n "$user_uid" ]]; then
+            if [[ -e "/run/user/${user_uid}/bus" ]]; then
+                sudo -u "$TARGET_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
+                    gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
+            fi
+            if command -v dbus-run-session >/dev/null 2>&1; then
+                sudo -u "$TARGET_USER" dbus-run-session \
+                    gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
 # Post-install service reload and validation
 finalize_installation() {
     echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
@@ -449,10 +511,21 @@ finalize_installation() {
         fi
     fi
 
+    # Configure power button handling
+    configure_power_button
+
     echo ""
     echo -e "${GREEN}==============================================================================${NC}"
-    echo -e "${GREEN}${BOLD}     [✔] FPC1022 FINGERPRINT DRIVER INSTALLED SUCCESSFULLY!${NC}"
+    echo -e "${GREEN}${BOLD}     [✔] UNIFIED INSTALLATION COMPLETE!${NC}"
+    echo -e "${GREEN}${BOLD}         - FPC1022 Fingerprint Driver: Installed & Running${NC}"
+    echo -e "${GREEN}${BOLD}         - Power Button Handling: Configured (Interactive / No Accidental Suspend)${NC}"
     echo -e "${GREEN}==============================================================================${NC}"
+    echo ""
+    echo -e "${BOLD}Summary of Applied Changes:${NC}"
+    echo -e "  • ${CYAN}Biometric Stack:${NC} Libfprint patched with FPC1022 Match-on-Host & SIGFM OpenCV matcher"
+    echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors with clean poweroff fallback"
+    echo -e "  • ${CYAN}Desktop Action:${NC} GNOME power-button-action set to 'interactive' (opens power menu)"
+    echo -e "  • ${CYAN}User Group:${NC} Added '${BOLD}${TARGET_USER}${NC}' to 'input' group"
     echo ""
     echo -e "${BOLD}Next Steps for Enrollment & Verification:${NC}"
     echo -e "  1. Enroll a finger for your user (${BOLD}${TARGET_USER}${NC}):"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Fingerprint Driver Uninstaller
-# Safely reverts system back to stock distribution libfprint
+# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Driver & Power Button Uninstaller
+# Safely reverts system back to stock distribution libfprint & clean power state
 # ==============================================================================
 
 set -euo pipefail
@@ -20,7 +20,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 echo -e "${YELLOW}==============================================================================${NC}"
-echo -e "${YELLOW}${BOLD}     FPC1022 FINGERPRINT DRIVER UNINSTALLER / ROLLBACK${NC}"
+echo -e "${YELLOW}${BOLD}     FPC1022 DRIVER & POWER BUTTON FIX UNINSTALLER / ROLLBACK${NC}"
 echo -e "${YELLOW}==============================================================================${NC}"
 echo ""
 
@@ -88,6 +88,32 @@ revert_arch() {
     ldconfig
 }
 
+revert_power_button() {
+    echo -e "${BLUE}[*] Reverting power button handling configuration...${NC}"
+    
+    # 1. Remove systemd-logind config and reload
+    if [[ -f /etc/systemd/logind.conf.d/10-power-button.conf ]]; then
+        echo -e "${BLUE}[*] Removing /etc/systemd/logind.conf.d/10-power-button.conf...${NC}"
+        rm -f /etc/systemd/logind.conf.d/10-power-button.conf
+        if command -v systemctl >/dev/null 2>&1; then
+            echo -e "${BLUE}[*] Reloading systemd-logind...${NC}"
+            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || systemctl restart systemd-logind 2>/dev/null || true
+        fi
+        echo -e "${GREEN}[✔] Removed logind power button override and reloaded systemd-logind.${NC}"
+    fi
+
+    # 2. Remove GNOME system-wide dconf override
+    if [[ -f /etc/dconf/db/local.d/01-power-button ]]; then
+        echo -e "${BLUE}[*] Removing /etc/dconf/db/local.d/01-power-button...${NC}"
+        rm -f /etc/dconf/db/local.d/01-power-button
+        if command -v dconf >/dev/null 2>&1; then
+            echo -e "${BLUE}[*] Updating dconf database...${NC}"
+            dconf update 2>/dev/null || true
+            echo -e "${GREEN}[✔] dconf database updated.${NC}"
+        fi
+    fi
+}
+
 case "$DISTRO_ID" in
     fedora|rhel|centos)
         revert_fedora
@@ -112,6 +138,9 @@ case "$DISTRO_ID" in
         ;;
 esac
 
+# Revert power button configurations
+revert_power_button
+
 echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
 udevadm control --reload 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
@@ -119,6 +148,8 @@ systemctl restart fprintd.service || true
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${GREEN}${BOLD}     [✔] UNINSTALLATION COMPLETE - STOCK DRIVER RESTORED${NC}"
+echo -e "${GREEN}${BOLD}     [✔] UNINSTALLATION COMPLETE${NC}"
+echo -e "${GREEN}${BOLD}         - Stock Libfprint Restored${NC}"
+echo -e "${GREEN}${BOLD}         - Power Button Customizations Removed${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo ""

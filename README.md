@@ -1,15 +1,18 @@
-# Xiaomi Mi NoteBook Ultra / Pro / Max — Linux Fingerprint Driver
+# Xiaomi Mi NoteBook Ultra / Pro / Max — Unified Linux Fingerprint Driver & Power Button Fix
 
 [![Linux Supported](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black&style=for-the-badge)](#supported-hardware)
 [![Device ID](https://img.shields.io/badge/Hardware-10a5%3A9200-blue?style=for-the-badge&logo=usb)](#supported-hardware)
 [![Sensor](https://img.shields.io/badge/Sensor-FPC1022-brightgreen?style=for-the-badge)](#how-it-works)
+[![Power Button](https://img.shields.io/badge/Power%20Button-Interactive%20%2F%20No%20Suspend-success?style=for-the-badge)](#power-button--fingerprint-coexistence)
 [![Matcher](https://img.shields.io/badge/Matcher-SIGFM%20(OpenCV%20SIFT)-orange?style=for-the-badge)](#biometric-matching-algorithm-sigfm)
 [![License](https://img.shields.io/badge/License-LGPL--2.1-blueviolet?style=for-the-badge)](#license)
 [![Distros](https://img.shields.io/badge/Distros-Fedora%20%7C%20Ubuntu%20%7C%20Arch%20%7C%20Debian-informational?style=for-the-badge)](#quick-installation)
 
-A production-grade Linux driver and user-space integration for the **Fingerprint Cards (FPC) FPC1022** USB fingerprint sensor (`10a5:9200`) found on **Xiaomi Mi NoteBook Ultra**, **Mi NoteBook Pro**, and **RedmiBook Pro / Max** laptops.
+A unified, production-grade 1-click Linux solution for both the **Fingerprint Cards (FPC) FPC1022** USB fingerprint sensor (`10a5:9200`) and **proper power button handling** on **Xiaomi Mi NoteBook Ultra**, **Mi NoteBook Pro**, and **RedmiBook Pro / Max** laptops.
 
-This repository provides ready-to-run installation scripts, pre-built distribution packages (Fedora, Ubuntu/Debian, Arch Linux), standalone upstream patches, and the complete source code tree.
+On these laptops, the fingerprint sensor is physically integrated directly into the power button. Under stock Linux desktop settings, resting a finger on the sensor or pressing it during authentication frequently triggers an accidental system suspend. This repository solves both issues seamlessly in a single unified installer:
+1. **FPC1022 Fingerprint Driver**: Full match-on-host biometric support with TLS-PSK USB communication and OpenCV SIFT/FLANN matching (SIGFM).
+2. **Power Button Coexistence Fix**: Prevents accidental sleep by setting GNOME's power button action to `'interactive'` (displaying the power off / restart dialog), delegating handling to desktop environment inhibitors, adding the user to the `input` group, and providing clean poweroff fallback in `systemd-logind` when uninhibited (lock screen, TTY, display manager).
 
 ---
 
@@ -17,6 +20,7 @@ This repository provides ready-to-run installation scripts, pre-built distributi
 
 - [Supported Hardware](#supported-hardware)
 - [Key Features](#key-features)
+- [Power Button & Fingerprint Coexistence](#power-button--fingerprint-coexistence)
 - [How It Works](#how-it-works)
 - [Quick Installation (1-Step)](#quick-installation)
 - [Enrollment & Usage Guide](#enrollment--usage-guide)
@@ -56,13 +60,41 @@ Bus 003 Device 003: ID 10a5:9200 FPC FPC Sensor Controller
 
 ## Key Features
 
-- **Seamless Linux Integration**: Works natively with `fprintd` and standard Linux PAM (`sudo`, GDM, SDDM, LightDM, Polkit, lock screens).
+- **Unified 1-Click Installer**: Deploys both the FPC1022 biometric driver and system power button coexistence fix in one automated step.
+- **Accidental Suspend Prevention**: Reconfigures GNOME to `'interactive'` power button action, showing the power dialog instead of putting the laptop to sleep when touching the sensor.
+- **Clean Logind Poweroff Fallback**: Configures `/etc/systemd/logind.conf.d/10-power-button.conf` (`PowerKeyIgnoreInhibited=no`, `HandlePowerKey=poweroff`) to honor desktop inhibitors while ensuring clean shutdown when uninhibited (lock screen, TTY, display manager).
+- **Seamless Linux PAM Integration**: Works natively with `fprintd` and standard Linux PAM (`sudo`, GDM, SDDM, LightDM, Polkit, lock screens).
 - **Desktop Settings Integration**: Direct GUI support in GNOME Settings (`Settings -> Users -> Fingerprint Login`) and KDE System Settings.
 - **Encrypted USB Channel**: Implements host-driven **TLS-PSK tunneling** over USB bulk endpoints (host as TLS server, sensor as TLS client).
 - **SIGFM SIFT Biometric Matcher**: Overcomes the physical limitations of small 112×88 pixel sensors where traditional NIST NBIS Bozorth3 minutiae matching fails, using OpenCV SIFT keypoint descriptors with geometric consistency checks.
 - **Package Manager Shielding**: Automatically guards against package updates (`dnf upgrade`, `apt upgrade`, `pacman -Syu`) overwriting the driver with unpatched stock packages.
 - **SELinux Compatible**: Automatically configures the appropriate `lib_t` SELinux file contexts so enforcement remains enabled with zero AVC denials.
-- **1-Click Rollback**: Fully reversible using `./uninstall.sh` to restore your pristine factory distribution packages anytime.
+- **1-Click Rollback**: Fully reversible using `./uninstall.sh` to restore your pristine factory distribution packages and clean power settings anytime.
+
+---
+
+## Power Button & Fingerprint Coexistence
+
+### The Problem
+On the Xiaomi Mi NoteBook Ultra / Pro / Max, the fingerprint sensor and physical power button share the same hardware button cap:
+- Resting a finger on the sensor or pressing slightly during fingerprint enrollment/verification can register a mechanical `KEY_POWER` keypress event.
+- By default, modern Linux desktop environments (such as GNOME) configure the power button action to `suspend`.
+- Consequently, users trying to authenticate or enroll prints often suffered abrupt, unwanted system suspends.
+
+### The Unified Fix
+This repository fixes the interaction at both the system and desktop layers:
+1. **`systemd-logind` Configuration (`configs/10-power-button.conf`)**:
+   ```ini
+   [Login]
+   HandlePowerKey=poweroff
+   HandlePowerKeyLongPress=poweroff
+   PowerKeyIgnoreInhibited=no
+   ```
+   Setting `PowerKeyIgnoreInhibited=no` ensures that while a desktop session (like GNOME) is running with an active inhibitor, `logind` defers power key events to the desktop environment. When no desktop inhibitor is present (such as at the login screen, lock screen, or a TTY), pressing the power button safely performs a clean system `poweroff` instead of an unstable sleep state.
+2. **GNOME Dconf Configuration (`/etc/dconf/db/local.d/01-power-button`)**:
+   Sets `org.gnome.settings-daemon.plugins.power power-button-action` to `'interactive'`. Instead of suspending the machine, a short press prompts the user with the interactive power dialog (Power Off / Restart / Cancel).
+3. **User Input Group**:
+   Adds the target user to the `input` group (`usermod -a -G input "$TARGET_USER"`) for proper event device access.
 
 ---
 
@@ -105,7 +137,10 @@ sudo ./install.sh
 4. Deploys the patched `libfprint` and SIGFM OpenCV runtime dependencies (`/usr/local/lib64/fprint-deps`).
 5. Sets required SELinux permissions (`lib_t`).
 6. Configures package manager protection (`excludepkgs=libfprint*` in `/etc/dnf/dnf.conf`, `apt-mark hold`, or `IgnorePkg` in pacman).
-7. Restarts `fprintd.service` and validates sensor readiness.
+7. Installs `/etc/systemd/logind.conf.d/10-power-button.conf` (`HandlePowerKey=poweroff`, `PowerKeyIgnoreInhibited=no`) and reloads `systemd-logind`.
+8. Configures GNOME power button action to `'interactive'` via `/etc/dconf/db/local.d/01-power-button` and updates `dconf`.
+9. Adds target user to the `input` group for event handling.
+10. Restarts `fprintd.service` and validates sensor readiness.
 
 ---
 
@@ -258,7 +293,7 @@ sudo systemctl restart fprintd.service
 
 ## Uninstallation & Rollback
 
-To completely remove the driver and restore your clean distribution stock `libfprint`:
+To completely remove the driver, reset power button handling, and restore your clean distribution stock `libfprint`:
 
 ```bash
 sudo ./uninstall.sh
@@ -268,7 +303,9 @@ The rollback script:
 1. Re-enables distribution updates by clearing package manager exclusions.
 2. Reinstalls the official stock `libfprint` package from distribution repositories.
 3. Cleans up custom runtime libraries and linker configurations.
-4. Restarts `fprintd.service`.
+4. Removes `/etc/systemd/logind.conf.d/10-power-button.conf` and reloads `systemd-logind`.
+5. Removes `/etc/dconf/db/local.d/01-power-button` and updates `dconf`.
+6. Restarts `fprintd.service`.
 
 ---
 
@@ -311,9 +348,11 @@ Ensure `/etc/dnf/dnf.conf` retains `excludepkgs=libfprint*`.
 ```text
 ├── README.md             # Complete documentation and usage guide
 ├── LICENSE               # LGPL-2.1 Open-Source License
-├── install.sh            # Automated distribution-agnostic installer
-├── uninstall.sh          # Safe rollback script to stock libfprint
+├── install.sh            # Automated unified installer (driver + power button fix)
+├── uninstall.sh          # Safe rollback script (stock libfprint + clean power state)
 ├── .gitignore            # Git ignore rules for build and cache artifacts
+├── configs/              # Managed system configuration drop-ins
+│   └── 10-power-button.conf # systemd-logind power button override
 ├── packages/             # Pre-built distribution packages and runtime libraries
 │   ├── fedora/           # Tested Fedora binaries and OpenCV runtime libraries
 │   │   ├── libfprint-2.so.2.0.0
