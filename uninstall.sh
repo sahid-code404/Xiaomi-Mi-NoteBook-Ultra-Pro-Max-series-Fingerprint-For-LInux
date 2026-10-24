@@ -40,9 +40,9 @@ revert_fedora() {
     local dnf_conf="/etc/dnf/dnf.conf"
     if [[ -f "$dnf_conf" ]]; then
         echo -e "${BLUE}[*] Removing libfprint exclusion from $dnf_conf...${NC}"
-        sed -i 's/libfprint\*//g' "$dnf_conf"
+        sed -i -E 's/\blibfprint\*[ \t]*//g' "$dnf_conf"
         # Clean up dangling empty excludepkgs=
-        sed -i '/^[ \t]*excludepkgs=[ \t]*$/d' "$dnf_conf"
+        sed -i -E '/^[ \t]*excludepkgs[ \t]*=[ \t]*$/d' "$dnf_conf"
     fi
 
     # Reinstall stock Fedora libfprint package
@@ -51,6 +51,7 @@ revert_fedora() {
         echo -e "${YELLOW}[!] DNF reinstall failed, checking backup binary...${NC}"
         if [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
             cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
+            ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
             echo -e "${GREEN}[✔] Restored from /usr/lib64/libfprint-2.so.2.0.0.stock-backup${NC}"
         fi
     }
@@ -61,6 +62,11 @@ revert_fedora() {
     rm -rf /usr/local/lib64/fprint-deps
     rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
 
+    # Restore SELinux contexts
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v /usr/lib64/libfprint* 2>/dev/null || true
+    fi
+
     ldconfig
 }
 
@@ -68,16 +74,18 @@ revert_debian() {
     echo -e "${BLUE}[*] Reverting Debian/Ubuntu packages...${NC}"
     apt-mark unhold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
     apt-get remove -y libfprint-fpc1022 2>/dev/null || true
-    apt-get install --reinstall -y libfprint-2-2 fprintd
+    apt-get install -y libfprint-2-2 fprintd
+    ldconfig
 }
 
 revert_arch() {
     echo -e "${BLUE}[*] Reverting Arch Linux packages...${NC}"
     if [[ -f /etc/pacman.conf ]]; then
-        sed -i 's/libfprint//g' /etc/pacman.conf
-        sed -i '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
+        sed -i -E 's/\blibfprint\b[ \t]*//g' /etc/pacman.conf
+        sed -i -E '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
     fi
     pacman -S --noconfirm libfprint fprintd
+    ldconfig
 }
 
 case "$DISTRO_ID" in

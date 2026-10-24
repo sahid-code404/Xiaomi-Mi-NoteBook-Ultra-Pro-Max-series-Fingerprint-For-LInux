@@ -222,9 +222,32 @@ sudo pacman -S --needed meson ninja gcc glib2 libgusb pixman openssl libgudev \
 
 ### 2. Configure and Compile
 
+**Fedora / RHEL:**
 ```bash
 cd src/libfprint
-meson setup build -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+meson setup build --prefix=/usr --libdir=/usr/lib64 -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+ninja -C build
+sudo ninja -C build install
+sudo chcon -t lib_t /usr/lib64/libfprint-2.so* 2>/dev/null || true
+sudo restorecon -v /usr/lib64/libfprint-2.so* 2>/dev/null || true
+sudo ldconfig
+sudo systemctl restart fprintd.service
+```
+
+**Ubuntu / Debian:**
+```bash
+cd src/libfprint
+meson setup build --prefix=/usr -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+ninja -C build
+sudo ninja -C build install
+sudo ldconfig
+sudo systemctl restart fprintd.service
+```
+
+**Arch Linux:**
+```bash
+cd src/libfprint
+meson setup build --prefix=/usr --libdir=/usr/lib -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
 ninja -C build
 sudo ninja -C build install
 sudo ldconfig
@@ -298,11 +321,11 @@ Ensure `/etc/dnf/dnf.conf` retains `excludepkgs=libfprint*`.
 │   ├── deb/              # Ubuntu / Debian binary package (.deb)
 │   └── arch/             # Arch Linux binary package (.pkg.tar.zst)
 ├── patches/              # Clean standalone git patches for upstream libfprint
-│   ├── 0001-Add-SIGFM-SIFT-based-matching-algorithm.patch
-│   ├── 0002-Add-fpc1022-driver-for-FPC-Disum-match-on-host.patch
-│   ├── 0003-device-Validate-gallery-equality-only-for-raw.patch
+│   ├── 0001-Add-SIGFM-SIFT-based-matching-algorithm-for-small-ar.patch
+│   ├── 0002-Add-fpc1022-driver-for-FPC-Disum-match-on-host-senso.patch
+│   ├── 0003-device-Validate-gallery-equality-only-for-raw-prints.patch
 │   ├── 0004-sigfm-Harden-matching-and-template-handling.patch
-│   ├── 0005-fpc1022-Harden-TLS-framing-and-capture.patch
+│   ├── 0005-fpc1022-Harden-TLS-framing-and-capture-lifecycle.patch
 │   └── 0006-packaging-Add-native-packages-and-Ubuntu-CI.patch
 └── src/
     └── libfprint/        # Full pristine libfprint source tree with driver & matcher

@@ -16,8 +16,11 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_USER="${SUDO_USER:-$USER}"
+if [[ "$TARGET_USER" == "root" ]]; then
+    TARGET_USER="$(logname 2>/dev/null || id -nu 1000 2>/dev/null || echo "root")"
+fi
 
 BUILD_MODE=false
 ASSUME_YES=false
@@ -45,7 +48,7 @@ Options:
 
 Supported Distributions:
   - Fedora Linux (Workstation 39, 40, 41, 42, 45, etc.) / RHEL / CentOS
-  - Ubuntu (22.04 LTS, 24.04 LTS, 26.04) / Debian / Pop!_OS / Linux Mint
+  - Ubuntu (22.04 LTS, 24.04 LTS, etc.) / Debian / Pop!_OS / Linux Mint
   - Arch Linux / Manjaro / EndeavourOS
 EOF
 }
@@ -114,6 +117,57 @@ detect_distro() {
     echo -e "${BLUE}[*] Detected Distribution: ${BOLD}${PRETTY_NAME:-$DISTRO_ID}${NC}"
 }
 
+# Protect libfprint from dnf upgrade
+protect_dnf_packages() {
+    local dnf_conf="/etc/dnf/dnf.conf"
+    if [[ -f "$dnf_conf" ]]; then
+        echo -e "${BLUE}[*] Protecting libfprint from DNF system upgrades...${NC}"
+        if grep -E -q "^[ \t]*excludepkgs[ \t]*=" "$dnf_conf"; then
+            if ! grep -q "libfprint\*" "$dnf_conf"; then
+                sed -i -E 's/^[ \t]*excludepkgs[ \t]*=(.*)/excludepkgs=\1 libfprint*/' "$dnf_conf"
+                echo -e "${GREEN}[✔] Appended libfprint* to excludepkgs in $dnf_conf${NC}"
+            else
+                echo -e "${GREEN}[✔] DNF excludepkgs already configured for libfprint*.${NC}"
+            fi
+        else
+            if grep -q "^\[main\]" "$dnf_conf"; then
+                sed -i '/^\[main\]/a excludepkgs=libfprint*' "$dnf_conf"
+            else
+                echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
+            fi
+            echo -e "${GREEN}[✔] Added excludepkgs=libfprint* to $dnf_conf${NC}"
+        fi
+    fi
+}
+
+# Protect libfprint from apt upgrade
+protect_apt_packages() {
+    echo -e "${BLUE}[*] Locking libfprint packages in APT...${NC}"
+    apt-mark hold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
+}
+
+# Protect libfprint from pacman upgrade
+protect_arch_packages() {
+    if [[ -f /etc/pacman.conf ]]; then
+        echo -e "${BLUE}[*] Protecting libfprint from Pacman upgrades...${NC}"
+        if grep -E -q "^[ \t]*IgnorePkg" /etc/pacman.conf; then
+            if ! grep -q "\blibfprint\b" /etc/pacman.conf; then
+                sed -i -E 's/^[ \t]*IgnorePkg[ \t]*=[ \t]*(.*)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
+                echo -e "${GREEN}[✔] Appended libfprint to IgnorePkg in /etc/pacman.conf${NC}"
+            else
+                echo -e "${GREEN}[✔] Pacman IgnorePkg already configured for libfprint.${NC}"
+            fi
+        else
+            if grep -q "^\[options\]" /etc/pacman.conf; then
+                sed -i '/^\[options\]/a IgnorePkg = libfprint' /etc/pacman.conf
+            else
+                echo -e "\n[options]\nIgnorePkg = libfprint" >> /etc/pacman.conf
+            fi
+            echo -e "${GREEN}[✔] Added IgnorePkg = libfprint to /etc/pacman.conf${NC}"
+        fi
+    fi
+}
+
 # Fedora / RHEL installation
 install_fedora() {
     echo -e "${BLUE}[*] Preparing installation for Fedora/RHEL...${NC}"
@@ -175,12 +229,12 @@ install_fedora() {
         ln -sf libtbb.so.12.17 libtbb.so.12
         ln -sf libtbb.so.12 libtbb.so
         
-        # Link host system crypto and ssl
-        if [[ -f /lib64/libcrypto.so.3 ]]; then
-            ln -sf /lib64/libcrypto.so.3 libcrypto.so
+        # Link host system crypto and ssl if available
+        if [[ -f /usr/lib64/libcrypto.so.3 ]]; then
+            ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
         fi
-        if [[ -f /lib64/libssl.so.3 ]]; then
-            ln -sf /lib64/libssl.so.3 libssl.so
+        if [[ -f /usr/lib64/libssl.so.3 ]]; then
+            ln -sf /usr/lib64/libssl.so.3 libssl.so
         fi
     )
 
@@ -210,29 +264,6 @@ install_fedora() {
     protect_dnf_packages
 }
 
-# Protect libfprint from dnf upgrade
-protect_dnf_packages() {
-    local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]]; then
-        echo -e "${BLUE}[*] Protecting libfprint from DNF system upgrades...${NC}"
-        if grep -q "^excludepkgs=" "$dnf_conf"; then
-            if ! grep -q "libfprint\*" "$dnf_conf"; then
-                sed -i 's/^excludepkgs=\(.*\)/excludepkgs=\1 libfprint*/' "$dnf_conf"
-                echo -e "${GREEN}[✔] Appended libfprint* to excludepkgs in $dnf_conf${NC}"
-            else
-                echo -e "${GREEN}[✔] DNF excludepkgs already configured for libfprint*.${NC}"
-            fi
-        else
-            if grep -q "^\[main\]" "$dnf_conf"; then
-                sed -i '/^\[main\]/a excludepkgs=libfprint*' "$dnf_conf"
-            else
-                echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
-            fi
-            echo -e "${GREEN}[✔] Added excludepkgs=libfprint* to $dnf_conf${NC}"
-        fi
-    fi
-}
-
 # Ubuntu / Debian installation
 install_ubuntu_debian() {
     echo -e "${BLUE}[*] Preparing installation for Ubuntu/Debian...${NC}"
@@ -243,16 +274,20 @@ install_ubuntu_debian() {
     fi
 
     local deb_pkg="$SCRIPT_DIR/packages/deb/libfprint-fpc1022_1.94.100_amd64.deb"
+    local installed=false
     if [[ -f "$deb_pkg" ]]; then
-        echo -e "${BLUE}[*] Installing pre-compiled Debian package...${NC}"
+        echo -e "${BLUE}[*] Attempting installation of pre-compiled Debian package...${NC}"
         apt-get update -y
-        apt-get install -y "$deb_pkg" fprintd
-        
-        # Hold package to prevent apt upgrades from overwriting it
-        echo -e "${BLUE}[*] Locking package in APT...${NC}"
-        apt-mark hold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
-    else
-        echo -e "${YELLOW}[!] Deb package not found at $deb_pkg. Building from source...${NC}"
+        if apt-get install -y "$deb_pkg" fprintd 2>/dev/null; then
+            installed=true
+            protect_apt_packages
+        else
+            echo -e "${YELLOW}[!] Pre-compiled package dependencies not met on this release.${NC}"
+            echo -e "${YELLOW}    Falling back to building from source for native compatibility...${NC}"
+        fi
+    fi
+
+    if [[ "$installed" != "true" ]]; then
         install_from_source_debian
     fi
 
@@ -268,36 +303,21 @@ install_arch() {
     echo -e "${BLUE}[*] Preparing installation for Arch Linux...${NC}"
 
     local arch_pkg="$SCRIPT_DIR/packages/arch/libfprint-fpc1022-1.94.100-1-x86_64.pkg.tar.zst"
+    local installed=false
     if [[ "$BUILD_MODE" != "true" && -f "$arch_pkg" ]]; then
-        echo -e "${BLUE}[*] Installing pre-compiled Arch package...${NC}"
+        echo -e "${BLUE}[*] Attempting installation of pre-compiled Arch package...${NC}"
         pacman -S --needed --noconfirm fprintd
-        pacman -U --noconfirm "$arch_pkg"
-
-        # Add IgnorePkg to /etc/pacman.conf if not already present
-        if [[ -f /etc/pacman.conf ]]; then
-            if grep -q "^IgnorePkg" /etc/pacman.conf; then
-                if ! grep -q "libfprint" /etc/pacman.conf; then
-                    sed -i 's/^IgnorePkg[ ]*=[ ]*\(.*\)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
-                fi
-            else
-                sed -i '/^\[options\]/a IgnorePkg = libfprint' /etc/pacman.conf
-            fi
-            echo -e "${GREEN}[✔] Added libfprint to IgnorePkg in /etc/pacman.conf${NC}"
+        if pacman -U --noconfirm "$arch_pkg" 2>/dev/null; then
+            installed=true
+            protect_arch_packages
+        else
+            echo -e "${YELLOW}[!] Pre-compiled package incompatible with current system libraries.${NC}"
+            echo -e "${YELLOW}    Falling back to building from source for native compatibility...${NC}"
         fi
-    else
-        echo -e "${BLUE}[*] Building via PKGBUILD...${NC}"
-        pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl libgudev polkit doctest opencv fprintd
-        BUILD_DIR="/tmp/fpc1022_arch_build"
-        rm -rf "$BUILD_DIR"
-        mkdir -p "$BUILD_DIR"
-        cp -r "$SCRIPT_DIR/src/libfprint" "$BUILD_DIR/src"
-        (
-            cd "$BUILD_DIR/src"
-            meson setup build -Ddrivers=fpc1022 -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
-            ninja -C build
-            ninja -C build install
-        )
-        rm -rf "$BUILD_DIR"
+    fi
+
+    if [[ "$installed" != "true" ]]; then
+        install_from_source_arch
     fi
 }
 
@@ -312,13 +332,37 @@ install_from_source_fedora() {
         exit 1
     fi
 
+    # Backup stock Fedora libfprint library if not already backed up
+    local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
+    local backup_lib="/usr/lib64/libfprint-2.so.2.0.0.stock-backup"
+    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        echo -e "${BLUE}[*] Backing up stock system libfprint to ${backup_lib}...${NC}"
+        cp -p "$target_lib" "$backup_lib"
+    fi
+
     echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
-    local bdir="$src_dir/build"
-    rm -rf "$bdir"
-    meson setup "$bdir" "$src_dir" -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
-    ninja -C "$bdir"
-    echo -e "${BLUE}[*] Installing compiled driver...${NC}"
-    ninja -C "$bdir" install
+    local build_tmp
+    build_tmp="$(mktemp -d /tmp/fpc1022_fedora_build.XXXXXX)"
+    cp -r "$src_dir" "$build_tmp/src"
+
+    (
+        cd "$build_tmp/src"
+        meson setup build --prefix=/usr --libdir=/usr/lib64 -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+        ninja -C build
+        echo -e "${BLUE}[*] Installing compiled driver to /usr/lib64/...${NC}"
+        ninja -C build install
+    )
+    rm -rf "$build_tmp"
+
+    # SELinux Permissions
+    if command -v chcon >/dev/null 2>&1; then
+        echo -e "${BLUE}[*] Configuring SELinux file contexts (lib_t)...${NC}"
+        chcon -t lib_t /usr/lib64/libfprint-2.so* 2>/dev/null || true
+    fi
+    if command -v restorecon >/dev/null 2>&1; then
+        restorecon -v /usr/lib64/libfprint-2.so* 2>/dev/null || true
+    fi
+
     ldconfig
     protect_dnf_packages
 }
@@ -330,12 +374,56 @@ install_from_source_debian() {
     apt-get install -y meson ninja-build build-essential libglib2.0-dev libgusb-dev libpixman-1-dev libssl-dev libgudev-1.0-dev libpolkit-gobject-1-dev doctest-dev libopencv-dev fprintd
     
     local src_dir="$SCRIPT_DIR/src/libfprint"
-    local bdir="$src_dir/build"
-    rm -rf "$bdir"
-    meson setup "$bdir" "$src_dir" -Ddrivers=fpc1022 -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
-    ninja -C "$bdir"
-    ninja -C "$bdir" install
+    if [[ ! -d "$src_dir" ]]; then
+        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
+    local build_tmp
+    build_tmp="$(mktemp -d /tmp/fpc1022_debian_build.XXXXXX)"
+    cp -r "$src_dir" "$build_tmp/src"
+
+    (
+        cd "$build_tmp/src"
+        meson setup build --prefix=/usr -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+        ninja -C build
+        echo -e "${BLUE}[*] Installing compiled driver to /usr/...${NC}"
+        ninja -C build install
+    )
+    rm -rf "$build_tmp"
+
     ldconfig
+    protect_apt_packages
+}
+
+# Source build for Arch Linux
+install_from_source_arch() {
+    echo -e "${BLUE}[*] Installing build dependencies via Pacman...${NC}"
+    pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl libgudev polkit doctest opencv fprintd
+    
+    local src_dir="$SCRIPT_DIR/src/libfprint"
+    if [[ ! -d "$src_dir" ]]; then
+        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
+    local build_tmp
+    build_tmp="$(mktemp -d /tmp/fpc1022_arch_build.XXXXXX)"
+    cp -r "$src_dir" "$build_tmp/src"
+
+    (
+        cd "$build_tmp/src"
+        meson setup build --prefix=/usr --libdir=/usr/lib -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+        ninja -C build
+        echo -e "${BLUE}[*] Installing compiled driver to /usr/lib/...${NC}"
+        ninja -C build install
+    )
+    rm -rf "$build_tmp"
+
+    ldconfig
+    protect_arch_packages
 }
 
 # Post-install service reload and validation
@@ -352,10 +440,12 @@ finalize_installation() {
 
     # Optional authselect configuration for Fedora
     if command -v authselect >/dev/null 2>&1; then
-        if ! authselect current | grep -q "with-fingerprint"; then
-            echo -e "${BLUE}[*] Enabling fingerprint auth in authselect...${NC}"
-            authselect enable-feature with-fingerprint 2>/dev/null || true
-            authselect apply-changes 2>/dev/null || true
+        if authselect current >/dev/null 2>&1; then
+            if ! authselect current | grep -q "with-fingerprint"; then
+                echo -e "${BLUE}[*] Enabling fingerprint auth in authselect...${NC}"
+                authselect enable-feature with-fingerprint 2>/dev/null || true
+                authselect apply-changes 2>/dev/null || true
+            fi
         fi
     fi
 
