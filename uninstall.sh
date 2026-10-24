@@ -106,6 +106,7 @@ revert_power_button() {
     if [[ -f /etc/dconf/db/local.d/01-power-button ]]; then
         echo -e "${BLUE}[*] Removing /etc/dconf/db/local.d/01-power-button...${NC}"
         rm -f /etc/dconf/db/local.d/01-power-button
+        rm -f /etc/dconf/db/local.d/locks/01-power-button
         if command -v dconf >/dev/null 2>&1; then
             echo -e "${BLUE}[*] Updating dconf database...${NC}"
             dconf update 2>/dev/null || true

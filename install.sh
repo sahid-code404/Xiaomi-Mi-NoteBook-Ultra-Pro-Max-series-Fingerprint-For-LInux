@@ -458,12 +458,15 @@ configure_power_button() {
 
     # 3. GNOME power button action (set to 'interactive' to show power menu instead of suspend)
     local dconf_dir="/etc/dconf/db/local.d"
-    mkdir -p "$dconf_dir"
+    mkdir -p "$dconf_dir" "$dconf_dir/locks"
     cat > "$dconf_dir/01-power-button" << 'EOF'
 [org/gnome/settings-daemon/plugins/power]
 power-button-action='interactive'
 EOF
-    echo -e "${GREEN}[✔] Created GNOME system-wide power button setting in ${dconf_dir}/01-power-button${NC}"
+    cat > "$dconf_dir/locks/01-power-button" << 'EOF'
+/org/gnome/settings-daemon/plugins/power/power-button-action
+EOF
+    echo -e "${GREEN}[✔] Created GNOME system-wide power button setting and lock in ${dconf_dir}${NC}"
 
     if command -v dconf >/dev/null 2>&1; then
         echo -e "${BLUE}[*] Updating dconf database...${NC}"
@@ -476,12 +479,14 @@ EOF
         local user_uid
         user_uid="$(id -u "$TARGET_USER" 2>/dev/null || echo "")"
         if [[ -n "$user_uid" ]]; then
-            if [[ -e "/run/user/${user_uid}/bus" ]]; then
-                sudo -u "$TARGET_USER" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
-                    gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
-            fi
+            sudo -u "$TARGET_USER" \
+                XDG_RUNTIME_DIR="/run/user/${user_uid}" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
+                gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
             if command -v dbus-run-session >/dev/null 2>&1; then
-                sudo -u "$TARGET_USER" dbus-run-session \
+                sudo -u "$TARGET_USER" \
+                    XDG_RUNTIME_DIR="/run/user/${user_uid}" \
+                    dbus-run-session \
                     gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
             fi
         fi

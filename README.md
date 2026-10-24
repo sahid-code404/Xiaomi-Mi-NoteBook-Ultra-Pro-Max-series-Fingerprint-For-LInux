@@ -106,12 +106,14 @@ This repository addresses both the hardware microcontroller state and the deskto
    HandlePowerKey=poweroff
    HandlePowerKeyLongPress=poweroff
    PowerKeyIgnoreInhibited=no
+   HoldoffTimeoutSec=0
    ```
-   Setting `PowerKeyIgnoreInhibited=no` ensures that while a desktop session (like GNOME) is running with an active inhibitor, `logind` defers power key events to the desktop environment. When no desktop inhibitor is present (such as at the login screen, lock screen, or a TTY), pressing the power button safely performs a clean system `poweroff` instead of an unstable sleep state.
-3. **GNOME Dconf Configuration (`/etc/dconf/db/local.d/01-power-button`)**:
-   Sets `org.gnome.settings-daemon.plugins.power power-button-action` to `'interactive'`. Instead of suspending the machine, a short press prompts the user with the interactive power dialog (Power Off / Restart / Cancel).
+   - Setting `PowerKeyIgnoreInhibited=no` ensures that while a desktop session (like GNOME) is running with an active inhibitor, `logind` defers power key events to the desktop environment. When no desktop inhibitor is present (such as at the login screen, lock screen, or a TTY), pressing the power button safely performs a clean system `poweroff` instead of an unstable sleep state.
+   - Setting `HoldoffTimeoutSec=0` disables systemd's default 30-second post-resume / post-boot ignore period, ensuring instant response to every power key press without dropped clicks or lag after waking.
+3. **GNOME Dconf Configuration & Lock (`/etc/dconf/db/local.d/01-power-button`)**:
+   Sets `org.gnome.settings-daemon.plugins.power power-button-action` to `'interactive'` and locks it system-wide. Instead of suspending the machine, a short press prompts the user with the interactive power dialog (Power Off / Restart / Cancel), avoiding unwanted sleep cycles.
 4. **User Input Group**:
-   Adds the target user to the `input` group (`usermod -a -G input "$TARGET_USER"`) for proper event device access.
+   Adds the target user to the `input` group (`usermod -a -G input "$TARGET_USER"`) for direct event device access.
 
 ---
 
