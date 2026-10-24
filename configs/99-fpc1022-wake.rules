@@ -1,0 +1,5 @@
+# Xiaomi Mi NoteBook Ultra / Pro / Max - FPC1022 Power Button Hardware Initializer
+# Wakes the FPC microcontroller into S0 working state as soon as the USB device is enumerated
+# so the integrated physical power button works immediately on cold boot.
+
+ACTION=="add|bind", SUBSYSTEM=="usb", ATTR{idVendor}=="10a5", ATTR{idProduct}=="9200", RUN+="/usr/local/bin/fpc1022-wake"

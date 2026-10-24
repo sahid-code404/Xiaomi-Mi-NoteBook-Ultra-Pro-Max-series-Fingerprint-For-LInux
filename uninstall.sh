@@ -112,6 +112,41 @@ revert_power_button() {
             echo -e "${GREEN}[✔] dconf database updated.${NC}"
         fi
     fi
+
+    # 3. Stop, disable and remove fpc1022-wake.service
+    if [[ -f /etc/systemd/system/fpc1022-wake.service ]]; then
+        echo -e "${BLUE}[*] Disabling and removing /etc/systemd/system/fpc1022-wake.service...${NC}"
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop fpc1022-wake.service 2>/dev/null || true
+            systemctl disable fpc1022-wake.service 2>/dev/null || true
+        fi
+        rm -f /etc/systemd/system/fpc1022-wake.service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        echo -e "${GREEN}[✔] Removed fpc1022-wake.service.${NC}"
+    fi
+
+    # 4. Remove udev wake rule
+    if [[ -f /etc/udev/rules.d/99-fpc1022-wake.rules ]]; then
+        echo -e "${BLUE}[*] Removing /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
+        rm -f /etc/udev/rules.d/99-fpc1022-wake.rules
+        echo -e "${GREEN}[✔] Removed udev wake rule.${NC}"
+    fi
+
+    # 5. Remove system-sleep hook
+    if [[ -f /usr/lib/systemd/system-sleep/fpc1022-wake ]]; then
+        echo -e "${BLUE}[*] Removing /usr/lib/systemd/system-sleep/fpc1022-wake...${NC}"
+        rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
+        echo -e "${GREEN}[✔] Removed sleep resume hook.${NC}"
+    fi
+
+    # 6. Remove fpc1022-wake binary
+    if [[ -f /usr/local/bin/fpc1022-wake ]]; then
+        echo -e "${BLUE}[*] Removing /usr/local/bin/fpc1022-wake...${NC}"
+        rm -f /usr/local/bin/fpc1022-wake
+        echo -e "${GREEN}[✔] Removed /usr/local/bin/fpc1022-wake binary.${NC}"
+    fi
 }
 
 case "$DISTRO_ID" in

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Xiaomi Mi NoteBook Ultra / Pro / Max - FPC1022 Resume Wake Hook
+# Re-initializes FPC1022 S0 state after system sleep / suspend / hibernate
+case "$1" in
+    post)
+        if [ -x /usr/local/bin/fpc1022-wake ]; then
+            /usr/local/bin/fpc1022-wake >/dev/null 2>&1 || true
+        fi
+        ;;
+esac

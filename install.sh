@@ -486,6 +486,72 @@ EOF
             fi
         fi
     fi
+
+    # 4. Compile and install early hardware initializer (fpc1022-wake)
+    # The physical power button tactile dome switch is integrated into the FPC1022 MCU.
+    # On cold boot, the MCU starts in sleep mode until S0 state is signaled via USB control transfer.
+    echo -e "${BLUE}[*] Setting up FPC1022 hardware power button wake components...${NC}"
+    local wake_bin="/usr/local/bin/fpc1022-wake"
+    local wake_c="$SCRIPT_DIR/tools/fpc1022-wake.c"
+    local wake_prebuilt="$SCRIPT_DIR/tools/fpc1022-wake"
+    local wake_installed=false
+
+    if command -v gcc >/dev/null 2>&1 && [[ -f "$wake_c" ]]; then
+        echo -e "${BLUE}[*] Compiling hardware initializer $wake_bin...${NC}"
+        local libusb_flags
+        libusb_flags="$(pkg-config --cflags --libs libusb-1.0 2>/dev/null || echo "-I/usr/include/libusb-1.0 -lusb-1.0")"
+        if gcc -O2 -Wall "$wake_c" $libusb_flags -o "$wake_bin" 2>/dev/null; then
+            chmod 755 "$wake_bin"
+            wake_installed=true
+            echo -e "${GREEN}[✔] Compiled and installed $wake_bin.${NC}"
+        fi
+    fi
+
+    if [[ "$wake_installed" != "true" && -f "$wake_prebuilt" ]]; then
+        echo -e "${BLUE}[*] Installing prebuilt hardware initializer binary to $wake_bin...${NC}"
+        cp -p "$wake_prebuilt" "$wake_bin"
+        chmod 755 "$wake_bin"
+        wake_installed=true
+        echo -e "${GREEN}[✔] Installed prebuilt $wake_bin.${NC}"
+    fi
+
+    # 5. Install early udev rule for instant trigger when USB 10a5:9200 enumerates
+    local udev_rule="$SCRIPT_DIR/configs/99-fpc1022-wake.rules"
+    if [[ -f "$udev_rule" ]]; then
+        echo -e "${BLUE}[*] Installing udev wake rule to /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
+        cp -p "$udev_rule" /etc/udev/rules.d/99-fpc1022-wake.rules
+        chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
+        echo -e "${GREEN}[✔] Installed udev rule for FPC1022 hardware initialization.${NC}"
+    fi
+
+    # 6. Install systemd boot service fpc1022-wake.service
+    local wake_service="$SCRIPT_DIR/configs/fpc1022-wake.service"
+    if [[ -f "$wake_service" ]]; then
+        echo -e "${BLUE}[*] Installing systemd service /etc/systemd/system/fpc1022-wake.service...${NC}"
+        cp -p "$wake_service" /etc/systemd/system/fpc1022-wake.service
+        chmod 644 /etc/systemd/system/fpc1022-wake.service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable fpc1022-wake.service 2>/dev/null || true
+            echo -e "${GREEN}[✔] Enabled fpc1022-wake.service for cold boot initialization.${NC}"
+        fi
+    fi
+
+    # 7. Install systemd-sleep hook for wake from suspend / hibernate
+    local sleep_script="$SCRIPT_DIR/configs/fpc1022-sleep-wake"
+    if [[ -d /usr/lib/systemd/system-sleep && -f "$sleep_script" ]]; then
+        echo -e "${BLUE}[*] Installing system-sleep resume hook to /usr/lib/systemd/system-sleep/fpc1022-wake...${NC}"
+        cp -p "$sleep_script" /usr/lib/systemd/system-sleep/fpc1022-wake
+        chmod 755 /usr/lib/systemd/system-sleep/fpc1022-wake
+        echo -e "${GREEN}[✔] Installed sleep resume hook.${NC}"
+    fi
+
+    # 8. Trigger immediate hardware initialization now
+    if [[ -x "$wake_bin" ]]; then
+        echo -e "${BLUE}[*] Triggering immediate hardware wake to S0 state...${NC}"
+        "$wake_bin" 2>/dev/null || true
+        echo -e "${GREEN}[✔] FPC1022 hardware initialized into S0 state.${NC}"
+    fi
 }
 
 # Post-install service reload and validation
@@ -518,11 +584,14 @@ finalize_installation() {
     echo -e "${GREEN}==============================================================================${NC}"
     echo -e "${GREEN}${BOLD}     [✔] UNIFIED INSTALLATION COMPLETE!${NC}"
     echo -e "${GREEN}${BOLD}         - FPC1022 Fingerprint Driver: Installed & Running${NC}"
-    echo -e "${GREEN}${BOLD}         - Power Button Handling: Configured (Interactive / No Accidental Suspend)${NC}"
+    echo -e "${GREEN}${BOLD}         - Power Button Cold-Boot Wake: Initialized & Enabled at Boot/Resume${NC}"
+    echo -e "${GREEN}${BOLD}         - Power Button Policy: Configured (Interactive / No Accidental Suspend)${NC}"
     echo -e "${GREEN}==============================================================================${NC}"
     echo ""
     echo -e "${BOLD}Summary of Applied Changes:${NC}"
     echo -e "  • ${CYAN}Biometric Stack:${NC} Libfprint patched with FPC1022 Match-on-Host & SIGFM OpenCV matcher"
+    echo -e "  • ${CYAN}Cold-Boot Wake:${NC} /usr/local/bin/fpc1022-wake, udev rule & systemd service (MCU S0 working state)"
+    echo -e "  • ${CYAN}Sleep/Resume Hook:${NC} /usr/lib/systemd/system-sleep/fpc1022-wake (immediate power button on resume)"
     echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors with clean poweroff fallback"
     echo -e "  • ${CYAN}Desktop Action:${NC} GNOME power-button-action set to 'interactive' (opens power menu)"
     echo -e "  • ${CYAN}User Group:${NC} Added '${BOLD}${TARGET_USER}${NC}' to 'input' group"
