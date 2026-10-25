@@ -313,38 +313,92 @@ install_fedora() {
         fi
     fi
 
-    # Start with only the dependency set shipped with this driver. The old
-    # directory was backed up above and is restored during uninstall.
-    rm -rf -- "$deps_dir"
-    mkdir -p "$deps_dir"
-    if ! cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"; then
-        print_err "Could not deploy the bundled Fedora runtime libraries."
+    # Build and patch bundled dependencies in a staging directory. Until this
+    # succeeds, leave the currently installed dependency directory untouched.
+    mkdir -p "$(dirname "$deps_dir")"
+    local deps_stage
+    deps_stage="$(mktemp -d "${deps_dir}.staging.XXXXXX")" || {
+        print_err "Could not create a staging directory for Fedora dependencies."
+        return 1
+    }
+    local deps_rollback="${deps_dir}.rollback.$$"
+    if [[ -e "$deps_rollback" || -L "$deps_rollback" ]]; then
+        rm -rf -- "$deps_stage"
+        print_err "Refusing to overwrite unexpected rollback path: $deps_rollback"
         return 1
     fi
-    (
-        cd "$deps_dir"
-        ln -sf libblas.so.3.12.1 libblas.so.3; ln -sf libblas.so.3 libblas.so
-        ln -sf libgfortran.so.5.0.0 libgfortran.so.5; ln -sf libgfortran.so.5 libgfortran.so
-        ln -sf liblapack.so.3.12.1 liblapack.so.3; ln -sf liblapack.so.3 liblapack.so
-        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410; ln -sf libopencv_core.so.410 libopencv_core.so
-        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410; ln -sf libopencv_features2d.so.410 libopencv_features2d.so
-        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410; ln -sf libopencv_flann.so.410 libopencv_flann.so
-        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410; ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
-        ln -sf libtbb.so.12.17 libtbb.so.12; ln -sf libtbb.so.12 libtbb.so
-        [[ -f /usr/lib64/libcrypto.so.3 ]] && ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
-        [[ -f /usr/lib64/libssl.so.3 ]] && ln -sf /usr/lib64/libssl.so.3 libssl.so
-    )
+
+    if ! cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_stage/"; then
+        rm -rf -- "$deps_stage"
+        print_err "Could not stage the bundled Fedora runtime libraries."
+        return 1
+    fi
+
     # Patch a temporary copy so the tracked prebuilt artifact stays unchanged.
     # The driver finds only its bundled dependencies through a private RUNPATH.
     local staged_driver="$backup_dir/libfprint-patched.so.2.0.0"
-    cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$staged_driver"
-    patchelf --set-rpath '$ORIGIN/../local/lib64/fprint-deps' "$staged_driver"
+    if ! cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$staged_driver" ||
+       ! patchelf --set-rpath '$ORIGIN/../local/lib64/fprint-deps' "$staged_driver"; then
+        rm -rf -- "$deps_stage"
+        rm -f -- "$staged_driver"
+        print_err "Could not prepare the patched Fedora driver binary."
+        return 1
+    fi
 
-    local -a bundled_libs=()
-    mapfile -d '' -t bundled_libs < <(find "$deps_dir" -maxdepth 1 -type f -name '*.so*' -print0)
-    for dep in "${bundled_libs[@]}"; do
-        patchelf --set-rpath '$ORIGIN' "$dep"
-    done
+    if ! (
+        cd "$deps_stage"
+        ln -sf libblas.so.3.12.1 libblas.so.3
+        ln -sf libblas.so.3 libblas.so
+        ln -sf libgfortran.so.5.0.0 libgfortran.so.5
+        ln -sf libgfortran.so.5 libgfortran.so
+        ln -sf liblapack.so.3.12.1 liblapack.so.3
+        ln -sf liblapack.so.3 liblapack.so
+        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410
+        ln -sf libopencv_core.so.410 libopencv_core.so
+        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410
+        ln -sf libopencv_features2d.so.410 libopencv_features2d.so
+        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410
+        ln -sf libopencv_flann.so.410 libopencv_flann.so
+        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410
+        ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
+        ln -sf libtbb.so.12.17 libtbb.so.12
+        ln -sf libtbb.so.12 libtbb.so
+        [[ ! -f /usr/lib64/libcrypto.so.3 ]] || ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
+        [[ ! -f /usr/lib64/libssl.so.3 ]] || ln -sf /usr/lib64/libssl.so.3 libssl.so
+
+        local -a bundled_libs=()
+        mapfile -d '' -t bundled_libs < <(find . -maxdepth 1 -type f -name '*.so*' -print0)
+        for dep in "${bundled_libs[@]}"; do
+            patchelf --set-rpath '$ORIGIN' "$dep" || exit 1
+        done
+    ); then
+        rm -rf -- "$deps_stage"
+        rm -f -- "$staged_driver"
+        print_err "Could not prepare the bundled dependency RUNPATHs."
+        return 1
+    fi
+
+    # Swap the dependency tree atomically, retaining the previous directory
+    # until the driver library has also been deployed successfully.
+    local had_old_deps=false
+    if [[ -d "$deps_dir" || -L "$deps_dir" ]]; then
+        if ! mv -- "$deps_dir" "$deps_rollback"; then
+            rm -rf -- "$deps_stage"
+            rm -f -- "$staged_driver"
+            print_err "Could not move the current dependency directory aside."
+            return 1
+        fi
+        had_old_deps=true
+    fi
+    if ! mv -- "$deps_stage" "$deps_dir"; then
+        if [[ "$had_old_deps" == "true" ]]; then
+            mv -- "$deps_rollback" "$deps_dir" || true
+        fi
+        rm -rf -- "$deps_stage"
+        rm -f -- "$staged_driver"
+        print_err "Could not activate the staged dependency directory."
+        return 1
+    fi
 
     # Deploy atomically from the same filesystem so interruption cannot leave
     # the live library truncated. The stock copy above remains available.
@@ -357,10 +411,17 @@ install_fedora() {
     if ! cp -p -- "$staged_driver" "$deploy_tmp" ||
        ! mv -f -- "$deploy_tmp" "$target_lib"; then
         rm -f -- "$deploy_tmp" "$staged_driver"
-        print_err "Could not atomically deploy the patched Fedora libfprint library."
+        rm -rf -- "$deps_dir"
+        if [[ "$had_old_deps" == "true" ]]; then
+            mv -- "$deps_rollback" "$deps_dir" || true
+        fi
+        print_err "Could not atomically deploy the patched Fedora libfprint library; restored the previous dependency directory."
         return 1
     fi
     rm -f -- "$staged_driver"
+    if [[ "$had_old_deps" == "true" ]]; then
+        rm -rf -- "$deps_rollback"
+    fi
     if [[ -e /usr/lib64/libfprint-2.so.2 || -L /usr/lib64/libfprint-2.so.2 ]]; then
         backup_managed_file /usr/lib64/libfprint-2.so.2
     fi
