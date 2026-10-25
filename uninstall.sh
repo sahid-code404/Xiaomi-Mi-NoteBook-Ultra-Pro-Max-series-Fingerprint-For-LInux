@@ -400,9 +400,12 @@ main() {
     if command -v systemctl >/dev/null 2>&1; then
         run_cmd systemctl daemon-reload
         run_cmd systemctl reload systemd-logind
-        if [[ -f /usr/local/share/fpc1022-backup/fpc1022-wake-service.state ]] &&
-           grep -qx 'enabled' /usr/local/share/fpc1022-backup/fpc1022-wake-service.state; then
+        local service_state="/usr/local/share/fpc1022-backup/fpc1022-wake-service.state"
+        if [[ -f "$service_state" ]] && grep -qx 'enabled' "$service_state"; then
             run_cmd systemctl enable fpc1022-wake.service
+        fi
+        if [[ -f "$service_state" ]] && grep -qx 'active' "$service_state"; then
+            run_cmd systemctl start fpc1022-wake.service
         fi
     fi
     run_cmd udevadm control --reload
