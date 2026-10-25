@@ -751,7 +751,7 @@ configure_security() {
         backup_managed_file "$polkit_dir/50-fprintd-auth.rules"
         cp -p "$polkit_rule" "$polkit_dir/50-fprintd-auth.rules"
         chmod 644 "$polkit_dir/50-fprintd-auth.rules"
-        print_ok "Enabled PolicyKit rule (password required to delete/enroll prints)"
+        print_ok "Enabled PolicyKit authorization for fingerprint enrollment/deletion and cross-user management"
     fi
 }
 
