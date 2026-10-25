@@ -111,14 +111,30 @@ gobject_introspection = dependency('gobject-introspection-1.0', required: get_op
 # SPI
 have_spi = host_machine.system() == 'linux'
 
-# SIGFM (SIFT keypoint matching) needs OpenCV; drivers that select it are
-# optional in the same way SPI drivers are when SPI is unavailable.
-# Distributions differ in which major version they ship a .pc file for.
-opencv_dep = dependency('opencv4', required: false)
-if not opencv_dep.found()
-    opencv_dep = dependency('opencv5', required: false)
+# SIGFM only uses OpenCV core, imgproc and features2d.  The umbrella opencv4
+# pkg-config dependency links every OpenCV module on Fedora, turning a small
+# fingerprint matcher into a large runtime dependency.  Keep the pkg-config
+# lookup for its portable include directory, but link only the required ABI.
+opencv_pkg = dependency('opencv4', required: false)
+if not opencv_pkg.found()
+    opencv_pkg = dependency('opencv5', required: false)
 endif
-have_opencv = opencv_dep.found()
+opencv_include_dir = ''
+opencv_dep = disabler()
+have_opencv = false
+if opencv_pkg.found()
+    opencv_include_dir = opencv_pkg.get_variable(pkgconfig: 'includedir', default_value: '')
+    opencv_core = cpp.find_library('opencv_core', required: false)
+    opencv_imgproc = cpp.find_library('opencv_imgproc', required: false)
+    opencv_features2d = cpp.find_library('opencv_features2d', required: false)
+    if opencv_include_dir != '' and opencv_core.found() and opencv_imgproc.found() and opencv_features2d.found()
+        opencv_dep = declare_dependency(
+            include_directories: include_directories(opencv_include_dir, is_system: true),
+            dependencies: [opencv_core, opencv_imgproc, opencv_features2d],
+        )
+        have_opencv = true
+    endif
+endif
 if have_opencv
     libfprint_conf.set10('HAVE_SIGFM', true)
 endif

@@ -17,10 +17,6 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_USER="${SUDO_USER:-$USER}"
-if [[ "$TARGET_USER" == "root" ]]; then
-    TARGET_USER="$(logname 2>/dev/null || id -nu 1000 2>/dev/null || echo "root")"
-fi
 
 BUILD_MODE=false
 ASSUME_YES=false
@@ -39,7 +35,7 @@ show_help() {
 Usage: sudo ./install.sh [OPTIONS]
 
 Options:
-  -b, --build       Compile driver from source instead of using pre-built binaries
+  -b, --build       Compile the driver from the included source tree
   -y, --yes         Automatic yes to prompts (non-interactive mode)
   -v, --verbose     Show detailed command outputs
   -h, --help        Show this help message and exit
@@ -129,90 +125,106 @@ check_sensor() {
 # ------------------------------------------------------------------------------
 # Driver Installation: Fedora / RHEL
 # ------------------------------------------------------------------------------
-install_fedora() {
-    local fedora_pkg="$SCRIPT_DIR/packages/fedora"
-    local deps_dir="/usr/local/lib64/fprint-deps"
-    local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
-    local backup_dir="/usr/local/share/fpc1022-backup"
-    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+source_version() {
+    sed -n "s/^[[:space:]]*version:[[:space:]]*'\([^']*\)'.*/\1/p" \
+        "$SCRIPT_DIR/src/libfprint/meson.build" | head -n 1
+}
 
-    # Install fprintd daemon if missing
-    if ! rpm -q fprintd >/dev/null 2>&1 || ! rpm -q fprintd-pam >/dev/null 2>&1; then
-        run_cmd dnf install -y fprintd fprintd-pam
-    fi
+download_fedora_release_rpm() {
+    local fedora_release="${VERSION_ID%%.*}"
+    local release_json rpm_url sums_url rpm_file checksum_line
+    local api_url="https://api.github.com/repos/sahid-code404/xiaomi-fprint-driver/releases/latest"
 
-    if [[ "$BUILD_MODE" == "true" ]] || [[ ! -f "$fedora_pkg/libfprint-2.so.2.0.0" ]]; then
-        install_from_source "fedora"
+    require_cmd curl sha256sum
+    release_json="$(curl --fail --silent --show-error --location "$api_url")" || return 1
+    rpm_url="$(printf '%s' "$release_json" | sed -n \
+        "s#.*\\\"browser_download_url\\\":\\\"\\([^\\\"]*libfprint-fpc1022-[^\\\"]*\\.fc${fedora_release}\\.x86_64\\.rpm\\)\\\".*#\\1#p" | head -n 1)"
+    sums_url="$(printf '%s' "$release_json" | sed -n \
+        's#.*"browser_download_url":"\([^"]*SHA256SUMS\)".*#\1#p' | head -n 1)"
+    [[ -n "$rpm_url" && -n "$sums_url" ]] || return 1
+
+    rpm_file="${rpm_url##*/}"
+    curl --fail --silent --show-error --location --output "/tmp/$rpm_file" "$rpm_url" || return 1
+    checksum_line="$(curl --fail --silent --show-error --location "$sums_url" | \
+        awk -v name="$rpm_file" '$2 == name { print; exit }')" || return 1
+    [[ -n "$checksum_line" ]] || return 1
+    printf '%s\n' "$checksum_line" | (cd /tmp && sha256sum --check --status -) || return 1
+    printf '%s\n' "/tmp/$rpm_file"
+}
+
+install_fedora_rpm() {
+    local src_dir="$SCRIPT_DIR/src/libfprint"
+    local spec_file="$src_dir/packaging/fedora/libfprint-fpc1022.spec"
+    local version
+    local build_dir
+    local topdir
+    local source_archive
+    local rpm_package
+
+    if [[ "$BUILD_MODE" != "true" ]]; then
+        if ! rpm_package="$(download_fedora_release_rpm)"; then
+            print_err "No verified Fedora ${VERSION_ID%%.*} RPM is available in the latest GitHub release."
+            print_err "Use --build only when you explicitly accept local build dependencies."
+            exit 1
+        fi
+        run_cmd dnf install -y --allowerasing --disableexcludes=all "$rpm_package" fprintd fprintd-pam
+        rm -f "$rpm_package"
+        print_ok "Installed verified native FPC1022 RPM"
         return
     fi
 
-    mkdir -p "$backup_dir"
+    [[ -d "$src_dir" && -f "$spec_file" ]] || {
+        print_err "Fedora packaging sources are incomplete."
+        exit 1
+    }
+    version="$(source_version)"
+    [[ -n "$version" ]] || { print_err "Could not determine the libfprint version."; exit 1; }
 
-    # Clean up legacy backup in /usr/lib64 to prevent ldconfig symlink hijacking
-    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
-        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
+    # Explicit development fallback. Do not deploy a bundled shared object into
+    # /usr: RPM must own every installed library.
+    run_cmd dnf install -y rpm-build meson ninja-build gcc gcc-c++ pkgconf-pkg-config \
+        glib2-devel libgusb-devel pixman-devel openssl-devel libgudev-devel \
+        systemd-devel doctest-devel opencv-devel libusb1-devel fprintd fprintd-pam
+
+    build_dir="$(mktemp -d /tmp/fpc1022-rpm.XXXXXX)"
+    topdir="$build_dir/rpmbuild"
+    source_archive="$topdir/SOURCES/libfprint-fpc1022-$version.tar.gz"
+    mkdir -p "$topdir/SOURCES" "$topdir/SPECS"
+
+    # Package a clean copy of the checked-in source. Build directories and Git
+    # metadata cannot influence the RPM payload or its build result.
+    tar --create --gzip --file "$source_archive" \
+        --directory="$(dirname "$src_dir")" \
+        --exclude='libfprint/build' --exclude='libfprint/build-*' --exclude='libfprint/.git' \
+        --transform "s,^libfprint,libfprint-fpc1022-$version," libfprint
+    cp -p "$spec_file" "$topdir/SPECS/"
+
+    if ! rpmbuild -ba --define "_topdir $topdir" \
+        "$topdir/SPECS/$(basename "$spec_file")"; then
+        rm -rf "$build_dir"
+        print_err "Native RPM build failed; no driver was installed."
+        exit 1
     fi
 
-    # Backup stock Fedora library once
-    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
-        cp -p "$target_lib" "$backup_lib"
+    rpm_package="$(find "$topdir/RPMS" -type f -name 'libfprint-fpc1022-*.rpm' -print -quit)"
+    if [[ -z "$rpm_package" ]]; then
+        rm -rf "$build_dir"
+        print_err "RPM build completed without producing a package."
+        exit 1
     fi
 
-    # Clean up any leftover stock backup file in /usr/lib64
-    rm -f /usr/lib64/*stock-backup*
+    # --allowerasing permits the custom package's declared libfprint conflict
+    # to be resolved transactionally; DNF remains the owner of the replacement.
+    # Older releases wrote a libfprint package-exclusion policy into dnf.conf.
+    # Bypass that legacy policy for this one audited local transaction without
+    # editing a user-managed DNF configuration file.
+    run_cmd dnf install -y --allowerasing --disableexcludes=all "$rpm_package" fprintd fprintd-pam
+    rm -rf "$build_dir"
+    print_ok "Built and installed native FPC1022 RPM"
+}
 
-    # Deploy bundled runtime dependencies
-    mkdir -p "$deps_dir"
-    cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"
-    (
-        cd "$deps_dir"
-        ln -sf libblas.so.3.12.1 libblas.so.3; ln -sf libblas.so.3 libblas.so
-        ln -sf libgfortran.so.5.0.0 libgfortran.so.5; ln -sf libgfortran.so.5 libgfortran.so
-        ln -sf liblapack.so.3.12.1 liblapack.so.3; ln -sf liblapack.so.3 liblapack.so
-        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410; ln -sf libopencv_core.so.410 libopencv_core.so
-        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410; ln -sf libopencv_features2d.so.410 libopencv_features2d.so
-        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410; ln -sf libopencv_flann.so.410 libopencv_flann.so
-        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410; ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
-        ln -sf libtbb.so.12.17 libtbb.so.12; ln -sf libtbb.so.12 libtbb.so
-        [[ -f /usr/lib64/libcrypto.so.3 ]] && ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
-        [[ -f /usr/lib64/libssl.so.3 ]] && ln -sf /usr/lib64/libssl.so.3 libssl.so
-    )
-    echo "$deps_dir" > /etc/ld.so.conf.d/fprint.conf
-
-    # Deploy patched driver and enforce symlink
-    cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$target_lib"
-    ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-
-    # SELinux contexts
-    if command -v chcon >/dev/null 2>&1; then
-        run_cmd chcon -t lib_t /usr/lib64/libfprint-2.so*
-        run_cmd chcon -R -t lib_t "$deps_dir"
-    fi
-    if command -v restorecon >/dev/null 2>&1; then
-        run_cmd restorecon -v /usr/lib64/libfprint-2.so*
-        run_cmd restorecon -Rv "$deps_dir"
-    fi
-
-    run_cmd ldconfig
-
-    # Shield libfprint from DNF upgrades
-    local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]]; then
-        if grep -E -q "^[ \t]*excludepkgs[ \t]*=" "$dnf_conf"; then
-            if ! grep -q "libfprint\*" "$dnf_conf"; then
-                sed -i -E 's/^[ \t]*excludepkgs[ \t]*=(.*)/excludepkgs=\1 libfprint*/' "$dnf_conf"
-            fi
-        else
-            if grep -q "^\[main\]" "$dnf_conf"; then
-                sed -i '/^\[main\]/a excludepkgs=libfprint*' "$dnf_conf"
-            else
-                echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
-            fi
-        fi
-    fi
-
-    print_ok "Installed FPC1022 driver and runtime libraries"
-    print_ok "Protected driver from DNF system upgrades"
+install_fedora() {
+    install_fedora_rpm
 }
 
 # ------------------------------------------------------------------------------
@@ -233,16 +245,13 @@ install_debian() {
         install_from_source "debian"
     fi
 
-    # Pin in apt
-    run_cmd apt-mark hold libfprint-2-2 libfprint-fpc1022
-
     # Enable PAM auth
     if command -v pam-auth-update >/dev/null 2>&1; then
         run_cmd pam-auth-update --enable fingerprint
     fi
 
     print_ok "Installed FPC1022 driver"
-    print_ok "Protected driver from APT package updates"
+    print_ok "Installed through APT; use fpc1022-doctor after system updates"
 }
 
 # ------------------------------------------------------------------------------
@@ -263,23 +272,8 @@ install_arch() {
         install_from_source "arch"
     fi
 
-    # Pin in pacman.conf
-    if [[ -f /etc/pacman.conf ]]; then
-        if grep -E -q "^[ \t]*IgnorePkg" /etc/pacman.conf; then
-            if ! grep -q "\blibfprint\b" /etc/pacman.conf; then
-                sed -i -E 's/^[ \t]*IgnorePkg[ \t]*=[ \t]*(.*)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
-            fi
-        else
-            if grep -q "^\[options\]" /etc/pacman.conf; then
-                sed -i '/^\[options\]/a IgnorePkg = libfprint' /etc/pacman.conf
-            else
-                echo -e "\n[options]\nIgnorePkg = libfprint" >> /etc/pacman.conf
-            fi
-        fi
-    fi
-
     print_ok "Installed FPC1022 driver"
-    print_ok "Protected driver from Pacman system updates"
+    print_ok "Installed through Pacman; use fpc1022-doctor after system updates"
 }
 
 # ------------------------------------------------------------------------------
@@ -299,22 +293,22 @@ install_from_source() {
     print_ok "Installing build prerequisites for ${family}..."
     case "$family" in
         fedora)
-            run_cmd dnf install -y meson ninja-build gcc gcc-c++ glib2-devel libgusb-devel \
+            run_cmd dnf install -y meson ninja-build gcc gcc-c++ libusb1-devel glib2-devel libgusb-devel \
                 pixman-devel openssl-devel libgudev-devel polkit-devel systemd-devel \
                 doctest-devel opencv-devel fprintd fprintd-pam
             ;;
         debian)
             run_cmd apt-get update -y
-            run_cmd apt-get install -y meson ninja-build build-essential libglib2.0-dev libgusb-dev \
+            run_cmd apt-get install -y meson ninja-build build-essential libusb-1.0-0-dev libglib2.0-dev libgusb-dev \
                 libpixman-1-dev libssl-dev libgudev-1.0-dev libpolkit-gobject-1-dev doctest-dev \
                 libopencv-dev fprintd
             ;;
         arch)
-            run_cmd pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl \
+            run_cmd pacman -S --needed --noconfirm meson ninja gcc libusb glib2 libgusb pixman openssl \
                 libgudev polkit doctest opencv fprintd
             ;;
         suse)
-            run_cmd zypper --non-interactive install meson ninja gcc gcc-c++ glib2-devel \
+            run_cmd zypper --non-interactive install meson ninja gcc gcc-c++ libusb-1_0-devel glib2-devel \
                 libgusb-devel libpixman-1-0-devel libopenssl-devel libgudev-1_0-devel polkit-devel \
                 systemd-devel doctest-devel opencv-devel fprintd fprintd-pam
             ;;
@@ -359,7 +353,7 @@ install_from_source() {
     fi
 
     run_cmd ldconfig
-    print_ok "Built and installed driver from source"
+    print_warn "Installed an unmanaged source build; use a distribution package where available."
 }
 
 # ------------------------------------------------------------------------------
@@ -378,11 +372,8 @@ configure_power_button() {
         print_ok "Configured instant power button response (logind)"
     fi
 
-    # 2. Add user to input group if group exists
-    if getent group input >/dev/null 2>&1 && [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
-        run_cmd usermod -a -G input "$TARGET_USER"
-        print_ok "Added user '${TARGET_USER}' to 'input' group"
-    fi
+    # 2. Do not add users to the privileged input group. fprintd uses its own
+    # D-Bus/Polkit authorization boundary and the udev rule grants uaccess.
 
     # 3. Clean up legacy dconf locks so desktop power action remains user-configurable
     local dconf_dir="/etc/dconf/db/local.d"
@@ -397,22 +388,16 @@ configure_power_button() {
     # 4. Hardware wake utility (fpc1022-wake)
     local wake_bin="/usr/local/bin/fpc1022-wake"
     local wake_c="$SCRIPT_DIR/tools/fpc1022-wake.c"
-    local wake_prebuilt="$SCRIPT_DIR/tools/fpc1022-wake"
     local wake_ok=false
 
-    if command -v gcc >/dev/null 2>&1 && [[ -f "$wake_c" ]]; then
-        local libusb_flags
-        libusb_flags="$(pkg-config --cflags --libs libusb-1.0 2>/dev/null || echo "-I/usr/include/libusb-1.0 -lusb-1.0")"
-        if gcc -O2 -Wall "$wake_c" $libusb_flags -o "$wake_bin" 2>/dev/null; then
-            chmod 755 "$wake_bin"
+    if command -v gcc >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 && \
+        pkg-config --exists libusb-1.0 && [[ -f "$wake_c" ]]; then
+        if gcc -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=3 \
+            -fPIE -pie -Wl,-z,relro,-z,now "$wake_c" \
+            $(pkg-config --cflags --libs libusb-1.0) -o "$wake_bin"; then
+            install -m 0755 "$SCRIPT_DIR/tools/fpc1022-doctor" /usr/local/bin/fpc1022-doctor
             wake_ok=true
         fi
-    fi
-
-    if [[ "$wake_ok" != "true" && -f "$wake_prebuilt" ]]; then
-        cp -p "$wake_prebuilt" "$wake_bin"
-        chmod 755 "$wake_bin"
-        wake_ok=true
     fi
 
     if [[ "$wake_ok" == "true" ]]; then
@@ -441,6 +426,9 @@ configure_power_button() {
         # Trigger immediate hardware wake
         "$wake_bin" 2>/dev/null || true
         print_ok "Installed hardware wake service (power button ready on boot & resume)"
+    else
+        print_err "Could not build fpc1022-wake from source (gcc, pkg-config, and libusb-1.0 development files are required)."
+        exit 1
     fi
 }
 
@@ -475,6 +463,9 @@ finalize_installation() {
                 print_ok "Enabled fingerprint PAM feature in authselect"
             fi
         fi
+    fi
+    if [[ -x /usr/local/bin/fpc1022-doctor ]]; then
+        /usr/local/bin/fpc1022-doctor --record-install
     fi
     print_ok "Reloaded system services and restarted fprintd"
 }

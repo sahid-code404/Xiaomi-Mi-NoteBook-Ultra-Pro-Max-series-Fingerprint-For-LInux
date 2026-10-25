@@ -82,7 +82,7 @@ int main(int argc, char *argv[])
     libusb_close(devh);
     libusb_exit(ctx);
 
-    if (verbose) {
+    if (r >= 0 && verbose) {
         printf("fpc1022-wake: Successfully signaled S0 to %04x:%04x.\n",
                FPC1022_VID, FPC1022_PID);
     }

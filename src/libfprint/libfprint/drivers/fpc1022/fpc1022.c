@@ -44,9 +44,17 @@ fpc1022_scale_nn_2x (FpImage *src)
   FpImage *dst = fp_image_new (sw, sh);
   int x, y;
 
-  for (y = 0; y < sh; y++)
-    for (x = 0; x < sw; x++)
-      dst->data[y * sw + x] = src->data[(y / 2) * src->width + (x / 2)];
+  /* Fill each output pair once, then duplicate the completed row. This keeps
+   * the exact nearest-neighbour image while avoiding division per output pixel. */
+  for (y = 0; y < src->height; y++)
+    {
+      guint8 *dst_row = dst->data + (y * 2) * sw;
+      const guint8 *src_row = src->data + y * src->width;
+
+      for (x = 0; x < src->width; x++)
+        dst_row[x * 2] = dst_row[x * 2 + 1] = src_row[x];
+      memcpy (dst_row + sw, dst_row, sw);
+    }
 
   dst->flags = src->flags;
   dst->ppmm = src->ppmm;
@@ -801,6 +809,17 @@ fpc1022_open_ssm_run (FpiSsm *ssm, FpDevice *dev)
           }
 
         SSL_CTX_set_options (self->ssl_ctx, SSL_OP_NO_COMPRESSION);
+        /* The sensor implements the TLS 1.2 PSK handshake. Pinning the
+         * version avoids an accidental downgrade or an unsupported TLS 1.3
+         * negotiation path when OpenSSL defaults change. */
+        if (!SSL_CTX_set_min_proto_version (self->ssl_ctx, TLS1_2_VERSION) ||
+            !SSL_CTX_set_max_proto_version (self->ssl_ctx, TLS1_2_VERSION))
+          {
+            fp_err ("Failed to require TLS 1.2 for the FPC1022 session");
+            fpi_ssm_mark_failed (ssm,
+                                 fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+            return;
+          }
         if (!SSL_CTX_use_psk_identity_hint (self->ssl_ctx, NULL))
           {
             fp_err ("Failed to configure TLS PSK identity hint");
@@ -810,13 +829,12 @@ fpc1022_open_ssm_run (FpiSsm *ssm, FpDevice *dev)
           }
         SSL_CTX_set_psk_server_callback (self->ssl_ctx, fpc1022_psk_server_cb);
 
-        /* Allow PSK and ECDHE-PSK cipher suites.
+        /* Allow only TLS 1.2 PSK/ECDHE-PSK suites with SHA-2 authentication.
          * The sensor's mbedTLS prefers ECDHE-PSK-WITH-AES-128-CBC-SHA256. */
         if (!SSL_CTX_set_cipher_list (self->ssl_ctx,
                                       "ECDHE-PSK-AES128-CBC-SHA256:"
                                       "ECDHE-PSK-AES256-CBC-SHA384:"
                                       "PSK-AES128-CBC-SHA256:PSK-AES256-CBC-SHA384:"
-                                      "PSK-AES128-CBC-SHA:PSK-AES256-CBC-SHA:"
                                       "PSK-AES128-GCM-SHA256:PSK-AES256-GCM-SHA384"))
           {
             fp_err ("Failed to configure TLS cipher list");
@@ -1167,6 +1185,14 @@ fpc1022_process_tls_data (FpDevice *dev, FpiSsm *ssm)
   while ((n = SSL_read (self->ssl, ssl_buf, sizeof (ssl_buf))) > 0)
     {
       fp_dbg ("SSL_read: %d decrypted bytes (state=%d)", n, state);
+      if ((gsize) n > FPC1022_TLS_RX_MAX_SIZE ||
+          self->tls_rx_buf->len > FPC1022_TLS_RX_MAX_SIZE - (gsize) n)
+        {
+          fp_err ("TLS receive buffer exceeded safe limit");
+          fpi_ssm_mark_failed (ssm,
+                               fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+          return;
+        }
       g_byte_array_append (self->tls_rx_buf, ssl_buf, n);
     }
 

@@ -21,7 +21,7 @@ sudo ./install.sh
 
 **Supported Distributions:** Fedora, Ubuntu, Debian, Arch Linux, openSUSE, Pop!_OS, and Linux Mint.
 
-The installer automatically deploys the patched `libfprint` driver, configures instant power button response, and locks the package so routine system updates won't overwrite it.
+The installer uses a verified native release package for Fedora, Debian/Ubuntu, and Arch where one is published. It does **not** freeze `libfprint` updates: after an OS, kernel, `fprintd`, OpenSSL, or systemd update, run `fpc1022-doctor` and perform an interactive fingerprint check.
 
 ---
 
@@ -59,9 +59,9 @@ You can also enroll directly from your desktop settings:
 
 | Laptop Model | Display | USB ID | Status |
 | :--- | :--- | :--- | :--- |
-| **Xiaomi Mi NoteBook Ultra** | 15.6" 3.2K 90Hz | `10a5:9200` | Working |
-| **Xiaomi Mi NoteBook Pro** | 14" / 15.6" 2.5K | `10a5:9200` | Working |
-| **RedmiBook Pro / Max Series** | Various | `10a5:9200` | Working |
+| **Xiaomi Mi NoteBook Ultra** | 15.6" 3.2K 90Hz | `10a5:9200` | Requires physical validation |
+| **Xiaomi Mi NoteBook Pro** | 14" / 15.6" 2.5K | `10a5:9200` | Requires physical validation |
+| **RedmiBook Pro / Max Series** | Various | `10a5:9200` | Requires physical validation |
 
 Check your sensor with:
 ```bash
@@ -115,7 +115,7 @@ flowchart TD
 ```
 
 - **TLS-PSK Encryption**: The FPC1022 is a match-on-host sensor. The driver establishes a TLS-PSK (Pre-Shared Key) encrypted USB channel to protect raw biometric image frames during transfer.
-- **SIGFM Matcher (OpenCV SIFT)**: Standard minutiae matching (Bozorth3) fails on compact $112 \times 88$ px sensors. SIGFM uses scale-invariant keypoint extraction and nearest-neighbor distance matching to achieve high verification accuracy with minimal false rejections.
+- **SIGFM Matcher (OpenCV SIFT)**: The compact $112 \times 88$ px sensor is upscaled once before scale-invariant keypoint extraction and nearest-neighbor matching. Matching accuracy and latency depend on the physical sensor, enrolled prints, OpenCV version, and threshold; verify them on the target laptop.
 
 ---
 
@@ -127,9 +127,9 @@ To restore official distribution drivers and remove custom configs:
 sudo ./uninstall.sh
 ```
 
-- Restores original stock `libfprint` without removing system packages.
+- Restores stock `libfprint` through the distribution package manager.
 - Removes power button rules and Polkit policies.
-- Cleans up unneeded orphan dependencies via `autoremove`.
+- Leaves unrelated packages alone; it never runs automatic `autoremove`.
 
 ---
 
@@ -140,6 +140,21 @@ To compile locally instead of using pre-built binaries:
 ```bash
 sudo ./install.sh --build
 ```
+
+`--build` is intended for development, offline recovery, and unsupported distributions. On Fedora it installs the compiler and OpenCV development dependencies (several GB), so normal installations should use the small release RPM instead. It installs an unmanaged library on distributions without native packaging; prefer the native package path whenever possible.
+
+## Updates and Kernel Changes
+
+This project contains a user-space `libfprint` driver and a small libusb wake helper; it is **not** a kernel module and does not use DKMS. That avoids kernel-module ABI breakage, but no project can guarantee future kernel, firmware, USB, systemd, `fprintd`, or OpenSSL compatibility.
+
+After a system update and reboot, run:
+
+```bash
+fpc1022-doctor
+fprintd-verify
+```
+
+The doctor command is read-only: it checks sensor presence, library resolution, native package ownership, service state, and whether the running kernel changed since the installation baseline. It cannot prove biometric matching accuracy or suspend/resume behavior; test those on the physical laptop.
 
 ---
 

@@ -50,6 +50,8 @@
 /* TLS inner message header size (cmdid + total_len + metadata) */
 #define FPC1022_TLS_MSG_HDR_SIZE 24
 #define FPC1022_TLS_MSG_MAX_SIZE (FPC1022_TLS_MSG_HDR_SIZE + FPC1022_IMG_SIZE)
+/* One complete inner message plus one maximum TLS record awaiting parsing. */
+#define FPC1022_TLS_RX_MAX_SIZE (FPC1022_TLS_MSG_MAX_SIZE + FPC1022_TLS_RECORD_MAX_SIZE)
 
 /* Commands (bRequest in USB control transfer) */
 #define FPC1022_CMD_INIT 0x01

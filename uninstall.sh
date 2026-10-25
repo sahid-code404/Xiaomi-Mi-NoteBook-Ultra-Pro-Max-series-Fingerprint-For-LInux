@@ -47,29 +47,14 @@ DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
 
 revert_fedora() {
-    # 1. Remove libfprint exclusion from dnf.conf
-    local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]]; then
-        sed -i -E 's/\blibfprint\*[ \t]*//g' "$dnf_conf"
-        sed -i -E '/^[ \t]*excludepkgs[ \t]*=[ \t]*$/d' "$dnf_conf"
+    # Current releases are installed as an RPM. Let DNF perform the complete
+    # replacement transaction instead of copying libraries behind its back.
+    if rpm -q libfprint-fpc1022 >/dev/null 2>&1; then
+        dnf remove -y libfprint-fpc1022
     fi
+    dnf install -y libfprint fprintd fprintd-pam
 
-    # 2. Restore stock libfprint (do NOT delete system packages)
-    local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
-    if [[ -f "$backup_lib" ]]; then
-        cp -p "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
-        ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-        print_ok "Restored stock libfprint from backup"
-    elif [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
-        cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
-        ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-        print_ok "Restored stock libfprint from legacy backup"
-    else
-        run_cmd dnf reinstall -y libfprint
-        print_ok "Reinstalled stock libfprint package"
-    fi
-
-    # Clean up custom dependency files and backup directory
+    # Clean up files produced only by pre-RPM releases.
     rm -f /etc/ld.so.conf.d/fprint.conf
     rm -rf /usr/local/lib64/fprint-deps
     rm -rf /usr/local/share/fpc1022-backup
@@ -79,26 +64,25 @@ revert_fedora() {
         run_cmd restorecon -v /usr/lib64/libfprint*
     fi
     run_cmd ldconfig
-    print_ok "Cleared DNF package exclusion locks"
+    print_ok "Restored the stock Fedora libfprint package"
 }
 
 revert_debian() {
-    run_cmd apt-mark unhold libfprint-2-2 libfprint-fpc1022
-    run_cmd apt-get install --reinstall -y libfprint-2-2 fprintd
+    if dpkg-query -W -f='${Status}' libfprint-fpc1022 2>/dev/null | grep -q '^install ok installed$'; then
+        apt-get remove -y libfprint-fpc1022
+    fi
+    apt-get install --reinstall -y libfprint-2-2 fprintd
     run_cmd ldconfig
     print_ok "Restored stock Debian/Ubuntu libfprint"
-    print_ok "Cleared APT package holds"
 }
 
 revert_arch() {
-    if [[ -f /etc/pacman.conf ]]; then
-        sed -i -E 's/\blibfprint\b[ \t]*//g' /etc/pacman.conf
-        sed -i -E '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
+    if pacman -Q libfprint-fpc1022 >/dev/null 2>&1; then
+        pacman -Rns --noconfirm libfprint-fpc1022
     fi
-    run_cmd pacman -S --noconfirm --needed libfprint fprintd
+    pacman -S --noconfirm --needed libfprint fprintd
     run_cmd ldconfig
     print_ok "Restored stock Arch libfprint"
-    print_ok "Cleared Pacman package locks"
 }
 
 revert_power_button() {
@@ -140,10 +124,12 @@ revert_power_button() {
         print_ok "Removed udev rule"
     fi
 
-    # 5. sleep hook & binary
+    # 5. sleep hook, binaries, and non-sensitive diagnostic baseline
     rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
     rm -f /usr/local/bin/fpc1022-wake
-    print_ok "Removed hardware wake binary and sleep hooks"
+    rm -f /usr/local/bin/fpc1022-doctor
+    rm -rf /var/lib/fpc1022-driver
+    print_ok "Removed hardware wake binary, diagnostic, and sleep hooks"
 }
 
 revert_security() {
@@ -151,38 +137,6 @@ revert_security() {
         rm -f /etc/polkit-1/rules.d/50-fprintd-auth.rules
         print_ok "Removed Polkit security rule"
     fi
-}
-
-cleanup_orphans() {
-    case "$DISTRO_ID" in
-        fedora|rhel|centos)
-            if command -v dnf >/dev/null 2>&1; then
-                run_cmd dnf autoremove -y
-            fi
-            ;;
-        ubuntu|debian|linuxmint|pop)
-            if command -v apt-get >/dev/null 2>&1; then
-                run_cmd apt-get autoremove -y
-            fi
-            ;;
-        arch|manjaro|endeavouros)
-            if command -v pacman >/dev/null 2>&1; then
-                local orphans
-                orphans="$(pacman -Qtdq 2>/dev/null || true)"
-                if [[ -n "$orphans" ]]; then
-                    run_cmd pacman -Rns --noconfirm $orphans
-                fi
-            fi
-            ;;
-        *)
-            if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]] && command -v dnf >/dev/null 2>&1; then
-                run_cmd dnf autoremove -y
-            elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]] && command -v apt-get >/dev/null 2>&1; then
-                run_cmd apt-get autoremove -y
-            fi
-            ;;
-    esac
-    print_ok "Cleaned up unneeded orphan dependencies"
 }
 
 # ------------------------------------------------------------------------------
@@ -226,8 +180,8 @@ main() {
     run_cmd udevadm trigger
     run_cmd systemctl restart fprintd.service
 
-    print_step "4/4" "Cleaning up system packages..."
-    cleanup_orphans
+    print_step "4/4" "Leaving unrelated packages untouched..."
+    print_ok "No automatic autoremove was run; review removable packages yourself."
 
     echo ""
     echo -e "${GREEN}====================================================================${NC}"

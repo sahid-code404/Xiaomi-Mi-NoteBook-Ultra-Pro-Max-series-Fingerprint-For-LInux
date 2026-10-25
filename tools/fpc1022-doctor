@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Read-only health report for the FPC1022 user-space driver stack.
+# It deliberately does not enroll, verify, or expose biometric data.
+set -euo pipefail
+
+readonly STATE_FILE=/var/lib/fpc1022-driver/install-state
+readonly VID_PID=10a5:9200
+
+mode=check
+if [[ ${1:-} == --record-install ]]; then
+    mode=record
+elif [[ $# -ne 0 ]]; then
+    printf 'Usage: %s [--record-install]\n' "${0##*/}" >&2
+    exit 2
+fi
+
+emit() { printf '%-5s %s\n' "$1" "$2"; }
+warn=0
+fail=0
+
+library_path() {
+    local path
+    path="$(ldconfig -p 2>/dev/null | awk '/libfprint-2\.so\.2 \(/ { print $NF; exit }')"
+    [[ -n $path ]] || return 1
+    printf '%s\n' "$path"
+}
+
+package_version() {
+    if command -v rpm >/dev/null 2>&1 && rpm -q libfprint-fpc1022 >/dev/null 2>&1; then
+        rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' libfprint-fpc1022
+    elif command -v dpkg-query >/dev/null 2>&1 && dpkg-query -W -f='${Status} ${Package} ${Version}\n' libfprint-fpc1022 2>/dev/null | grep -q '^install ok installed'; then
+        dpkg-query -W -f='${Package} ${Version}\n' libfprint-fpc1022
+    elif command -v pacman >/dev/null 2>&1 && pacman -Q libfprint-fpc1022 >/dev/null 2>&1; then
+        pacman -Q libfprint-fpc1022
+    else
+        return 1
+    fi
+}
+
+if [[ $mode == record ]]; then
+    [[ $(id -u) -eq 0 ]] || { emit FAIL 'recording install state requires root'; exit 1; }
+    install -d -m 0755 "${STATE_FILE%/*}"
+    {
+        printf 'format=1\n'
+        printf 'kernel=%s\n' "$(uname -r)"
+        printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'package=%s\n' "$(package_version 2>/dev/null || printf 'unmanaged-source-build')"
+        if lib=$(library_path); then
+            printf 'library=%s\n' "$lib"
+            printf 'library_sha256=%s\n' "$(sha256sum "$lib" | awk '{print $1}')"
+        fi
+    } >"$STATE_FILE"
+    chmod 0644 "$STATE_FILE"
+    emit PASS "recorded update baseline in $STATE_FILE"
+    exit 0
+fi
+
+printf 'FPC1022 driver health report (read-only)\n'
+
+if command -v lsusb >/dev/null 2>&1 && lsusb -d "$VID_PID" >/dev/null 2>&1; then
+    emit PASS "USB sensor $VID_PID is present"
+else
+    emit FAIL "USB sensor $VID_PID is not present"
+    fail=1
+fi
+
+if pkg=$(package_version 2>/dev/null); then
+    emit PASS "native package installed: $pkg"
+else
+    emit WARN 'no native libfprint-fpc1022 package is recorded; this may be a source install'
+    warn=1
+fi
+
+if lib=$(library_path); then
+    if [[ -r $lib ]]; then
+        emit PASS "loader resolves libfprint: $lib"
+    else
+        emit FAIL "loader returned unreadable libfprint path: $lib"
+        fail=1
+    fi
+else
+    emit FAIL 'dynamic loader cannot resolve libfprint-2.so.2'
+    fail=1
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-enabled --quiet fpc1022-wake.service 2>/dev/null; then
+        emit PASS 'wake service is enabled'
+    else
+        emit WARN 'wake service is not enabled'
+        warn=1
+    fi
+    if systemctl is-active --quiet fpc1022-wake.service 2>/dev/null; then
+        emit PASS 'wake service completed successfully in this boot'
+    else
+        emit WARN 'wake service is not active; inspect: systemctl status fpc1022-wake.service'
+        warn=1
+    fi
+fi
+
+if [[ -r $STATE_FILE ]]; then
+    recorded_kernel=$(awk -F= '$1 == "kernel" { print $2; exit }' "$STATE_FILE")
+    if [[ -n $recorded_kernel && $recorded_kernel != "$(uname -r)" ]]; then
+        emit WARN "kernel changed since installation ($recorded_kernel -> $(uname -r)); run fpc1022-doctor and perform an interactive fingerprint test"
+        warn=1
+    else
+        emit PASS "kernel matches recorded installation: $(uname -r)"
+    fi
+else
+    emit WARN 'no installation baseline exists; reinstall or run sudo fpc1022-doctor --record-install after a known-good interactive test'
+    warn=1
+fi
+
+emit INFO 'This checks integration only. It cannot prove enrollment, matching accuracy, suspend/resume behavior, or compatibility with future kernels/firmware.'
+
+if (( fail > 0 )); then
+    exit 1
+fi
+if (( warn > 0 )); then
+    exit 2
+fi
