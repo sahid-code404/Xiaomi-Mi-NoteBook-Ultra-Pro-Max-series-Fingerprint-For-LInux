@@ -335,14 +335,53 @@ install_arch() {
     print_ok "Installed through Pacman; use fpc1022-doctor after system updates"
 }
 
+detect_libdir() {
+    local family="$1" multiarch=""
+    case "$family" in
+        debian)
+            if command -v dpkg-architecture >/dev/null 2>&1; then
+                multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
+                multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]]; then
+                local candidate
+                for candidate in /usr/lib/*-linux-gnu; do
+                    [[ -d "$candidate" ]] || continue
+                    if [[ -e "$candidate/libfprint-2.so.2" || -f "$candidate/libfprint-2.so.2.0.0" ]]; then
+                        multiarch="${candidate#/usr/lib/}"
+                        break
+                    fi
+                done
+            fi
+            if [[ -n "$multiarch" && -d "/usr/lib/$multiarch" ]]; then
+                printf '/usr/lib/%s\n' "$multiarch"
+            else
+                printf '/usr/lib\n'
+            fi
+            ;;
+        fedora|suse)
+            [[ ! -d /usr/lib64 ]] || printf '/usr/lib64\n'
+            [[ -d /usr/lib64 ]] || printf '/usr/lib\n'
+            ;;
+        arch)
+            printf '/usr/lib\n'
+            ;;
+        *)
+            if [[ -d /usr/lib64 ]]; then printf '/usr/lib64\n'; else printf '/usr/lib\n'; fi
+            ;;
+    esac
+}
+
 # ------------------------------------------------------------------------------
 # Universal Driver Source Build (Fedora, Debian, Arch, openSUSE, Generic)
 # ------------------------------------------------------------------------------
 install_from_source() {
     local family="$1"
     local src_dir="$SCRIPT_DIR/src/libfprint"
-    local lib_dir="/usr/lib"
-    [[ -d /usr/lib64 ]] && lib_dir="/usr/lib64"
+    local lib_dir
+    lib_dir="$(detect_libdir "$family")"
 
     if [[ ! -d "$src_dir" ]]; then
         print_err "Source tree not found at $src_dir"
@@ -383,26 +422,56 @@ install_from_source() {
     esac
 
     # Isolate backup if stock lib exists
-    local backup_dir="/usr/local/share/fpc1022-backup"
+    local backup_dir="$BACKUP_ROOT"
     local target_lib="${lib_dir}/libfprint-2.so.2.0.0"
-    if [[ -f "$target_lib" && ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
-        mkdir -p "$backup_dir"
-        cp -p "$target_lib" "$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+    if [[ ! -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        print_err "No stock libfprint library or rollback backup found at $target_lib."
+        return 1
     fi
-    rm -f "${lib_dir}/"*stock-backup*
+    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        mkdir -p "$backup_dir"
+        if ! cp -p -- "$target_lib" "$backup_lib"; then
+            print_err "Could not back up the stock libfprint library."
+            return 1
+        fi
+    fi
 
     local build_tmp
     build_tmp="$(mktemp -d /tmp/fpc1022_build.XXXXXX)"
     cp -r "$src_dir" "$build_tmp/src"
 
-    (
+    if ! (
         cd "$build_tmp/src"
-        meson setup build --prefix=/usr --libdir="$lib_dir" -Ddrivers=all -Ddoc=false \
+        meson setup build --prefix=/usr --libdir="${lib_dir#/usr/}" -Ddrivers=all -Ddoc=false \
             -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
         ninja -C build
-        ninja -C build install
-    )
-    rm -rf "$build_tmp"
+        DESTDIR="$build_tmp/stage" ninja -C build install
+    ); then
+        rm -rf -- "$build_tmp"
+        print_err "Source build failed; the installed library was left unchanged."
+        return 1
+    fi
+
+    local staged_lib="$build_tmp/stage$target_lib"
+    local deploy_tmp
+    if [[ ! -f "$staged_lib" ]]; then
+        rm -rf -- "$build_tmp"
+        print_err "Staged build did not produce the expected runtime library: $staged_lib"
+        return 1
+    fi
+    deploy_tmp="$(mktemp "${target_lib}.fpc1022.XXXXXX")" || {
+        rm -rf -- "$build_tmp"
+        print_err "Could not create a temporary file beside $target_lib."
+        return 1
+    }
+    if ! cp -p -- "$staged_lib" "$deploy_tmp" || ! mv -f -- "$deploy_tmp" "$target_lib"; then
+        rm -f -- "$deploy_tmp"
+        rm -rf -- "$build_tmp"
+        print_err "Could not atomically deploy the runtime library; rollback backup remains available."
+        return 1
+    fi
+    rm -rf -- "$build_tmp"
 
     if command -v chcon >/dev/null 2>&1; then
         run_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
