@@ -327,14 +327,15 @@ sudo ./uninstall.sh
 
 The rollback script:
 1. Re-enables distribution updates by clearing package manager exclusions.
-2. Reinstalls the official stock `libfprint` package from distribution repositories.
+2. Restores official stock `libfprint` package without removing or uninstalling system packages.
 3. Cleans up custom runtime libraries and linker configurations.
 4. Stops, disables, and deletes `/etc/systemd/system/fpc1022-wake.service`.
 5. Removes `/etc/udev/rules.d/99-fpc1022-wake.rules` and reloads udev.
 6. Removes `/usr/lib/systemd/system-sleep/fpc1022-wake` and `/usr/local/bin/fpc1022-wake`.
 7. Removes `/etc/systemd/logind.conf.d/10-power-button.conf` and reloads `systemd-logind`.
-8. Removes `/etc/dconf/db/local.d/01-power-button` and updates `dconf`.
+8. Removes `/etc/polkit-1/rules.d/50-fprintd-auth.rules` and `/etc/dconf/db/local.d/01-power-button`.
 9. Restarts `fprintd.service`.
+10. Runs package manager autoremove at the end to clean up any unneeded orphan dependencies safely.
 
 ---
 

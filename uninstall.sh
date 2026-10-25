@@ -45,18 +45,18 @@ revert_fedora() {
         sed -i -E '/^[ \t]*excludepkgs[ \t]*=[ \t]*$/d' "$dnf_conf"
     fi
 
-    # Reinstall stock Fedora libfprint package
-    echo -e "${BLUE}[*] Reinstalling stock libfprint via DNF...${NC}"
-    dnf reinstall -y libfprint || {
-        echo -e "${YELLOW}[!] DNF reinstall failed, checking backup binary...${NC}"
-        if [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
-            cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
-            ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-            echo -e "${GREEN}[✔] Restored from /usr/lib64/libfprint-2.so.2.0.0.stock-backup${NC}"
-        fi
-    }
+    # Restore stock libfprint (do not remove system packages)
+    if [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
+        echo -e "${BLUE}[*] Restoring stock libfprint from backup...${NC}"
+        cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
+        ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
+        echo -e "${GREEN}[✔] Restored /usr/lib64/libfprint-2.so.2.0.0 from stock backup.${NC}"
+    else
+        echo -e "${BLUE}[*] Reinstalling stock libfprint via DNF...${NC}"
+        dnf reinstall -y libfprint 2>/dev/null || true
+    fi
 
-    # Clean up fprint-deps directory and ld.so config
+    # Clean up custom fprint-deps directory and ld.so config
     echo -e "${BLUE}[*] Cleaning up /usr/local/lib64/fprint-deps and /etc/ld.so.conf.d/fprint.conf...${NC}"
     rm -f /etc/ld.so.conf.d/fprint.conf
     rm -rf /usr/local/lib64/fprint-deps
@@ -72,9 +72,12 @@ revert_fedora() {
 
 revert_debian() {
     echo -e "${BLUE}[*] Reverting Debian/Ubuntu packages...${NC}"
+    # Unhold packages so system updates operate normally
     apt-mark unhold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
-    apt-get remove -y libfprint-fpc1022 2>/dev/null || true
-    apt-get install -y libfprint-2-2 fprintd
+
+    # Reinstall stock packages without uninstalling or removing any system packages
+    echo -e "${BLUE}[*] Reinstalling stock libfprint-2-2 and fprintd via APT...${NC}"
+    apt-get install --reinstall -y libfprint-2-2 fprintd 2>/dev/null || true
     ldconfig
 }
 
@@ -84,7 +87,9 @@ revert_arch() {
         sed -i -E 's/\blibfprint\b[ \t]*//g' /etc/pacman.conf
         sed -i -E '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
     fi
-    pacman -S --noconfirm libfprint fprintd
+    # Reinstall stock distribution packages without removing system packages
+    echo -e "${BLUE}[*] Reinstalling stock libfprint and fprintd via Pacman...${NC}"
+    pacman -S --noconfirm --needed libfprint fprintd 2>/dev/null || pacman -S --noconfirm libfprint fprintd 2>/dev/null || true
     ldconfig
 }
 
@@ -157,6 +162,49 @@ revert_power_button() {
     fi
 }
 
+cleanup_unused_dependencies() {
+    echo -e "${BLUE}[*] Checking for unused orphan dependencies to clean up...${NC}"
+    case "$DISTRO_ID" in
+        fedora|rhel|centos)
+            if command -v dnf >/dev/null 2>&1; then
+                echo -e "${BLUE}[*] Running 'dnf autoremove' for safe dependency cleanup...${NC}"
+                dnf autoremove -y 2>/dev/null || true
+            fi
+            ;;
+        ubuntu|debian|linuxmint|pop)
+            if command -v apt-get >/dev/null 2>&1; then
+                echo -e "${BLUE}[*] Running 'apt-get autoremove' for safe dependency cleanup...${NC}"
+                apt-get autoremove -y 2>/dev/null || true
+            fi
+            ;;
+        arch|manjaro|endeavouros)
+            if command -v pacman >/dev/null 2>&1; then
+                local orphans
+                orphans="$(pacman -Qtdq 2>/dev/null || true)"
+                if [[ -n "$orphans" ]]; then
+                    echo -e "${BLUE}[*] Cleaning up orphaned packages via pacman...${NC}"
+                    pacman -Rns --noconfirm $orphans 2>/dev/null || true
+                else
+                    echo -e "${GREEN}[✔] No orphaned dependencies found.${NC}"
+                fi
+            fi
+            ;;
+        *)
+            if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]] && command -v dnf >/dev/null 2>&1; then
+                dnf autoremove -y 2>/dev/null || true
+            elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]] && command -v apt-get >/dev/null 2>&1; then
+                apt-get autoremove -y 2>/dev/null || true
+            elif [[ "$DISTRO_LIKE" =~ (arch) ]] && command -v pacman >/dev/null 2>&1; then
+                local orphans
+                orphans="$(pacman -Qtdq 2>/dev/null || true)"
+                if [[ -n "$orphans" ]]; then
+                    pacman -Rns --noconfirm $orphans 2>/dev/null || true
+                fi
+            fi
+            ;;
+    esac
+}
+
 case "$DISTRO_ID" in
     fedora|rhel|centos)
         revert_fedora
@@ -187,12 +235,16 @@ revert_power_button
 echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
 udevadm control --reload 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
-systemctl restart fprintd.service || true
+systemctl restart fprintd.service 2>/dev/null || true
+
+# Safe cleanup of unused orphan dependencies at the very end
+cleanup_unused_dependencies
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
 echo -e "${GREEN}${BOLD}     [✔] UNINSTALLATION COMPLETE${NC}"
-echo -e "${GREEN}${BOLD}         - Stock Libfprint Restored${NC}"
+echo -e "${GREEN}${BOLD}         - Stock Libfprint Preserved & Restored (No System Packages Removed)${NC}"
 echo -e "${GREEN}${BOLD}         - Power Button Customizations Removed${NC}"
+echo -e "${GREEN}${BOLD}         - Safe Autoremove Cleanup Executed${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo ""
