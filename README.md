@@ -43,7 +43,7 @@ Optional integrations are off by default:
 | --- | --- |
 | `--power-button` | Configure power-button handling and resume initialization |
 | `--protect-enrollment` | Require administrator authorization for system-wide fingerprint enrollment/deletion |
-| `--build` | Build a native package from the included source |
+| `--build` | Compile from source; packaging behavior depends on the distribution |
 | `--verbose` | Show command output |
 
 ## Test before login
@@ -67,7 +67,7 @@ fpc1022-doctor
 fprintd-verify
 ```
 
-The diagnostic can check basic installation and device state; it cannot prove recognition accuracy or reliable suspend/resume on your laptop. The installer does not freeze system package updates. Prefer native packages where provided, and re-test after libfprint or operating-system updates.
+The source-build path is intended mainly for development/recovery; outside the Fedora native-RPM path it may install an unmanaged runtime library. The diagnostic can check basic installation and device state; it cannot prove recognition accuracy or reliable suspend/resume on your laptop. The installer does not freeze system package updates. Prefer native packages where provided, and re-test after libfprint or operating-system updates.
 
 ## Uninstall
 
