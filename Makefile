@@ -27,7 +27,7 @@ test-wake:
 check: syntax smoke lint test-static test-wake
 
 syntax:
-	@for script in install.sh uninstall.sh tests/smoke.sh tools/fpc1022-doctor; do bash -n "$script" || exit $?; done
+	@for script in install.sh uninstall.sh tests/smoke.sh tools/fpc1022-doctor; do bash -n "$$script" || exit $$?; done
 	sh -n configs/fpc1022-sleep-wake
 
 smoke:
