@@ -119,9 +119,15 @@ revert_fedora() {
         fi
     fi
 
-    # Remove bundled runtime dependencies. Keep the backup root until the
-    # common managed-file restoration pass has completed.
-    rm -rf /usr/local/lib64/fprint-deps
+    # Restore a pre-existing dependency directory if one was present. New
+    # installs have no backup here, so their bundled files are simply removed.
+    local deps_dir="/usr/local/lib64/fprint-deps"
+    local deps_backup="/usr/local/share/fpc1022-backup/previous-fprint-deps"
+    rm -rf -- "$deps_dir"
+    if [[ -d "$deps_backup" ]]; then
+        cp -a -- "$deps_backup" "$deps_dir"
+        print_ok "Restored previous runtime dependency directory"
+    fi
     rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
 
     if command -v restorecon >/dev/null 2>&1; then
