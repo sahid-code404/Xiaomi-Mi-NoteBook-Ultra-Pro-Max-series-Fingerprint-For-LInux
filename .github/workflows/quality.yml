@@ -30,7 +30,7 @@ jobs:
       - name: ShellCheck
         run: shellcheck --severity=error install.sh uninstall.sh tests/smoke.sh
       - name: Installer smoke tests
-        run: ./tests/smoke.sh
+        run: bash tests/smoke.sh
 
   build:
     name: Build libfprint with FPC1022
