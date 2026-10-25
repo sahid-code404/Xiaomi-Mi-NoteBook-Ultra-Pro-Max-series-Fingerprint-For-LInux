@@ -283,10 +283,15 @@ install_fedora() {
         patchelf --set-rpath '$ORIGIN' "$dep"
     done
 
-    # Deploy patched driver. Preserve an existing SONAME link before enforcing
-    # the standard relative link; if no link exists, rollback keeps the newly
-    # created standard link after restoring the stock library.
-    cp -p "$staged_driver" "$target_lib"
+    # Deploy atomically from the same filesystem so interruption cannot leave
+    # the live library truncated. The stock copy above remains available.
+    local deploy_tmp="${target_lib}.fpc1022.$"
+    if ! cp -p -- "$staged_driver" "$deploy_tmp" ||
+       ! mv -f -- "$deploy_tmp" "$target_lib"; then
+        rm -f -- "$deploy_tmp" "$staged_driver"
+        print_err "Could not atomically deploy the patched Fedora libfprint library."
+        return 1
+    fi
     rm -f -- "$staged_driver"
     if [[ -e /usr/lib64/libfprint-2.so.2 || -L /usr/lib64/libfprint-2.so.2 ]]; then
         backup_managed_file /usr/lib64/libfprint-2.so.2
@@ -443,9 +448,12 @@ install_from_source() {
         print_err "Staged libfprint library was not found at $staged_lib"
         return 1
     fi
-    if ! install -m 0644 -- "$staged_lib" "$target_lib"; then
+    local deploy_tmp="${target_lib}.fpc1022.$"
+    if ! cp -p -- "$staged_lib" "$deploy_tmp" ||
+       ! mv -f -- "$deploy_tmp" "$target_lib"; then
+        rm -f -- "$deploy_tmp"
         rm -rf -- "$build_tmp"
-        print_err "Could not deploy the staged libfprint runtime library to $target_lib."
+        print_err "Could not atomically deploy the staged libfprint runtime library to $target_lib."
         return 1
     fi
     rm -rf -- "$build_tmp"
