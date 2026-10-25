@@ -1,0 +1,66 @@
+name: Quality checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Installer and shell checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+      - name: Validate shell syntax
+        run: |
+          bash -n install.sh uninstall.sh tests/smoke.sh
+          sh -n configs/fpc1022-sleep-wake
+      - name: ShellCheck
+        run: shellcheck --severity=error install.sh uninstall.sh tests/smoke.sh
+      - name: Installer smoke tests
+        run: ./tests/smoke.sh
+
+  build:
+    name: Build libfprint with FPC1022
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential meson ninja-build pkg-config \
+            libglib2.0-dev libgusb-dev libssl-dev libgudev-1.0-dev \
+            libopencv-dev libpixman-1-dev libudev-dev libsystemd-dev \
+            libpolkit-gobject-1-dev doctest-dev libcairo2-dev \
+            libusb-1.0-0-dev gobject-introspection python3-cairo python3-gi
+      - name: Configure
+        working-directory: src/libfprint
+        run: >-
+          meson setup build
+          --prefix=/usr
+          --libdir=lib/x86_64-linux-gnu
+          -Ddrivers=all
+          -Ddoc=false
+          -Dintrospection=false
+          -Dinstalled-tests=false
+          -Dudev_hwdb=enabled
+      - name: Compile
+        working-directory: src/libfprint
+        run: meson compile -C build
+      - name: Run tests
+        working-directory: src/libfprint
+        run: meson test -C build --print-errorlogs
