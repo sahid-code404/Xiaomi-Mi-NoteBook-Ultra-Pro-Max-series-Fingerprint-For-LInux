@@ -11,17 +11,16 @@ groups=('fprint')
 depends=(
   'glib2'
   'glibc'
-  'libgcc'
+  'gcc-libs'
   'libgudev'
   'libgusb'
-  'libstdc++'
   'opencv'
   'openssl'
   'pixman'
 )
 makedepends=(
   'git'
-  'glib2-devel'
+  'glib2'
   'gobject-introspection'
   'meson'
   'ninja'
