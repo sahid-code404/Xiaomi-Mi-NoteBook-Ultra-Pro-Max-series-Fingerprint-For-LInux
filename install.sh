@@ -102,6 +102,16 @@ run_cmd() {
     fi
 }
 
+require_cmd() {
+    local command
+    for command in "$@"; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            print_err "Required command '$command' is not installed."
+            return 1
+        fi
+    done
+}
+
 # Track each configuration path before managing it so rollback can
 # restore prior user state instead of deleting files that predated installation.
 backup_managed_file() {
