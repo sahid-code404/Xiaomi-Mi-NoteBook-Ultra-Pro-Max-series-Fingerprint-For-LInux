@@ -190,6 +190,19 @@ detect_libdir() {
             if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
                 multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
             fi
+            # Minimal systems may not yet have dpkg-dev or gcc installed.
+            # Locate the multiarch directory that already owns libfprint.
+            if [[ -z "$multiarch" ]]; then
+                local candidate
+                for candidate in /usr/lib/*-linux-gnu; do
+                    [[ -d "$candidate" ]] || continue
+                    if [[ -f "$candidate/libfprint-2.so.2.0.0" ||
+                          -e "$candidate/libfprint-2.so.2" ]]; then
+                        multiarch="${candidate#/usr/lib/}"
+                        break
+                    fi
+                done
+            fi
             if [[ -n "$multiarch" && -d "/usr/lib/$multiarch" ]]; then
                 printf '/usr/lib/%s\n' "$multiarch"
             else
