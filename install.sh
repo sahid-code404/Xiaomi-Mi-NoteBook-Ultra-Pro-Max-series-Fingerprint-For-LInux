@@ -116,15 +116,29 @@ backup_managed_file() {
     local target="$1"
     local backup="$BACKUP_ROOT/config-backups/${target#/}"
     local manifest="$BACKUP_ROOT/managed-paths.txt"
+    local preexisting="$BACKUP_ROOT/preexisting-paths.txt"
+    local created="$BACKUP_ROOT/created-paths.txt"
 
     mkdir -p "$BACKUP_ROOT"
-    if [[ ( -e "$target" || -L "$target" ) && ! -e "$backup" && ! -L "$backup" ]]; then
+
+    # Classify each path only once so a repeat install never mistakes a file
+    # created by this project for a user's original configuration.
+    if grep -Fqx -- "$target" "$manifest" 2>/dev/null; then
+        return 0
+    fi
+
+    if [[ -e "$target" || -L "$target" ]]; then
         mkdir -p "$(dirname "$backup")"
-        cp -a -- "$target" "$backup"
+        if ! cp -a -- "$target" "$backup"; then
+            print_err "Could not back up existing managed path: $target"
+            return 1
+        fi
+        printf '%s\n' "$target" >> "$preexisting"
+    else
+        printf '%s\n' "$target" >> "$created"
     fi
-    if ! grep -Fqx -- "$target" "$manifest" 2>/dev/null; then
-        printf '%s\n' "$target" >> "$manifest"
-    fi
+
+    printf '%s\n' "$target" >> "$manifest"
 }
 
 detect_libdir() {
