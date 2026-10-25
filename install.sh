@@ -520,19 +520,37 @@ configure_power_button() {
     # Preserve a previously installed helper before replacing it.
     backup_managed_file "$wake_bin"
 
+    # Compile/copy to a temporary file first. A failed compiler or copy must
+    # not truncate an already working helper at the live path.
+    mkdir -p "$(dirname "$wake_bin")"
     if command -v gcc >/dev/null 2>&1 && [[ -f "$wake_c" ]]; then
         local libusb_flags
+        local wake_tmp
         libusb_flags="$(pkg-config --cflags --libs libusb-1.0 2>/dev/null || echo "-I/usr/include/libusb-1.0 -lusb-1.0")"
-        if gcc -O2 -Wall "$wake_c" $libusb_flags -o "$wake_bin" 2>/dev/null; then
-            chmod 755 "$wake_bin"
-            wake_ok=true
+        wake_tmp="$(mktemp "${wake_bin}.XXXXXX")" || wake_tmp=""
+        if [[ -n "$wake_tmp" ]]; then
+            if gcc -O2 -Wall "$wake_c" $libusb_flags -o "$wake_tmp" 2>/dev/null &&
+               chmod 755 "$wake_tmp" && mv -f -- "$wake_tmp" "$wake_bin"; then
+                wake_ok=true
+            else
+                rm -f -- "$wake_tmp"
+                print_warn "Could not build the wake helper; the previous installed binary was preserved."
+            fi
         fi
     fi
 
     if [[ "$wake_ok" != "true" && -f "$wake_prebuilt" ]]; then
-        cp -p "$wake_prebuilt" "$wake_bin"
-        chmod 755 "$wake_bin"
-        wake_ok=true
+        local wake_tmp
+        wake_tmp="$(mktemp "${wake_bin}.XXXXXX")" || wake_tmp=""
+        if [[ -n "$wake_tmp" ]]; then
+            if cp -p -- "$wake_prebuilt" "$wake_tmp" &&
+               chmod 755 "$wake_tmp" && mv -f -- "$wake_tmp" "$wake_bin"; then
+                wake_ok=true
+            else
+                rm -f -- "$wake_tmp"
+                print_warn "Could not install the bundled wake helper."
+            fi
+        fi
     fi
 
     if [[ "$wake_ok" == "true" ]]; then
