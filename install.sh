@@ -541,7 +541,11 @@ main() {
     fi
 
     print_step "4/5" "Applying security policies..."
-    configure_security
+    if [[ "$SENSOR_DETECTED" == "true" ]]; then
+        configure_security
+    else
+        print_warn "Fingerprint sensor not detected; skipping system-wide fprintd Polkit policy."
+    fi
 
     print_step "5/5" "Finalizing system services..."
     finalize_installation
