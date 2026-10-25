@@ -29,7 +29,12 @@ print_warn() { echo -e "    ${YELLOW}!${NC} $*"; }
 print_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 run_cmd() {
-    "$@" >/dev/null 2>&1 || true
+    local status=0
+    "$@" >/dev/null 2>&1 || status=$?
+    if (( status != 0 )); then
+        print_warn "Best-effort command failed (exit $status): $*"
+    fi
+    return 0
 }
 
 CLEANUP_ORPHANS=false
@@ -85,8 +90,12 @@ revert_fedora() {
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
         print_ok "Restored stock libfprint from legacy backup"
     else
-        run_cmd dnf reinstall -y libfprint
-        print_ok "Reinstalled stock libfprint package"
+        if dnf reinstall -y libfprint; then
+            print_ok "Reinstalled stock libfprint package"
+        else
+            print_err "Could not reinstall stock libfprint. Restore it with the Fedora package manager before using fingerprint authentication."
+            return 1
+        fi
     fi
 
     # Remove bundled runtime dependencies. Keep the backup root until the
@@ -98,24 +107,32 @@ revert_fedora() {
         run_cmd restorecon -v /usr/lib64/libfprint*
     fi
     run_cmd ldconfig
-    print_ok "Cleared DNF package exclusion locks"
+    print_warn "Inspect /etc/dnf/dnf.conf for legacy libfprint exclusions; this version preserves existing configuration."
 }
 
 revert_debian() {
     # Older releases may have held these packages, but there is no state file
     # that proves those holds were added by this project. Preserve user policy.
-    run_cmd apt-get install --reinstall -y libfprint-2-2 fprintd
+    if apt-get install --reinstall -y libfprint-2-2 fprintd; then
+        print_ok "Restored stock Debian/Ubuntu libfprint packages"
+    else
+        print_err "Could not restore stock packages. Resolve the package conflict before using fingerprint authentication."
+        return 1
+    fi
     run_cmd ldconfig
-    print_ok "Requested restoration of stock Debian/Ubuntu libfprint"
     print_warn "Check 'apt-mark showhold' and remove only any hold created for this driver."
 }
 
 revert_arch() {
     # Preserve pacman.conf because this project did not record its previous
     # contents. Explicitly install the stock packages without editing IgnorePkg.
-    run_cmd pacman -S --needed libfprint fprintd
+    if pacman -S --needed libfprint fprintd; then
+        print_ok "Restored stock Arch libfprint packages"
+    else
+        print_err "Could not restore stock packages. Resolve the package conflict before using fingerprint authentication."
+        return 1
+    fi
     run_cmd ldconfig
-    print_ok "Requested restoration of stock Arch libfprint"
     print_warn "Inspect /etc/pacman.conf for any legacy IgnorePkg entry for libfprint."
 }
 
@@ -316,7 +333,9 @@ main() {
     print_warn "Review PAM/authselect settings manually if an older installer enabled fingerprint login."
 
     # Restart fprintd after library restoration, if it is installed.
-    run_cmd systemctl restart fprintd.service
+    if systemctl is-active --quiet fprintd.service; then
+        run_cmd systemctl restart fprintd.service
+    fi
 
     print_step "5/5" "Optional orphan-package cleanup..."
     if [[ "$CLEANUP_ORPHANS" == "true" ]]; then
