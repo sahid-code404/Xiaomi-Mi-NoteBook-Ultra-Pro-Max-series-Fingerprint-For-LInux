@@ -16,6 +16,7 @@ install_help="$(bash install.sh --help)"
 grep -q -- '--build' <<< "$install_help" || fail "installer help is missing --build"
 grep -q -- '--verbose' <<< "$install_help" || fail "installer help is missing --verbose"
 grep -q -- '--power-button' <<< "$install_help" || fail "installer help is missing --power-button"
+grep -q -- '--protect-enrollment' <<< "$install_help" || fail "installer help is missing --protect-enrollment"
 
 uninstall_help="$(bash uninstall.sh --help)"
 grep -q -- '--cleanup-orphans' <<< "$uninstall_help" || fail "uninstaller help is missing opt-in cleanup option"
@@ -30,6 +31,10 @@ fi
 if grep -Eq 'apt-mark hold|excludepkgs=libfprint|IgnorePkg = libfprint' install.sh; then
     fail "installer must not silently block package updates"
 fi
+if grep -q ' > /etc/ld.so.conf.d/fprint.conf' install.sh; then
+    fail "installer must not add its private dependency directory to the global loader path"
+fi
+grep -q "patchelf --set-rpath" install.sh || fail "Fedora prebuilt path must use a private runtime search path"
 if grep -Eq 'autoremove -y|pacman -Rns --noconfirm' uninstall.sh; then
     fail "uninstaller must not automatically remove orphan packages"
 fi
