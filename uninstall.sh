@@ -105,6 +105,26 @@ is_managed_or_matching() {
     return 1
 }
 
+restore_file_atomically() {
+    local source="$1"
+    local target="$2"
+    local temp
+
+    if [[ ! -f "$source" ]]; then
+        print_err "Backup file does not exist: $source"
+        return 1
+    fi
+    temp="$(mktemp "${target}.restore.XXXXXX")" || {
+        print_err "Could not create a temporary restore file beside $target."
+        return 1
+    }
+    if ! cp -p -- "$source" "$temp" || ! mv -f -- "$temp" "$target"; then
+        rm -f -- "$temp"
+        print_err "Could not atomically restore $target; backup remains at $source."
+        return 1
+    fi
+}
+
 revert_fedora() {
     # Do not rewrite existing DNF configuration automatically: older
     # installer versions did not record whether exclusions predated installation.
@@ -125,11 +145,11 @@ revert_fedora() {
     # Restore stock libfprint (do NOT delete system packages)
     local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
     if [[ -f "$backup_lib" ]]; then
-        cp -p "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
+        restore_file_atomically "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
         print_ok "Restored stock libfprint from backup"
     elif [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
-        cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
+        restore_file_atomically /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
         print_ok "Restored stock libfprint from legacy backup"
     else
