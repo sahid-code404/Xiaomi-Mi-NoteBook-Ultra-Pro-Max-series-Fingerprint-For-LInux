@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Fingerprint & Power Button Installer
-# Target Sensor: FPC1022 (USB ID 10a5:9200) Match-on-Host Fingerprint Reader
+# Xiaomi Mi NoteBook Ultra / Pro / Max - Fingerprint & Power Button Installer
+# Supported Hardware: FPC1022 (USB ID 10a5:9200) Match-on-Host Fingerprint Reader
 # Author: Sahidul Haque (sahid-code404) & Contributors
+# License: LGPL-2.1-or-later
 # ==============================================================================
 
 set -euo pipefail
 
-# ANSI color codes
+# Visual formatting
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_USER="${SUDO_USER:-$USER}"
@@ -24,16 +24,13 @@ fi
 
 BUILD_MODE=false
 ASSUME_YES=false
+VERBOSE=false
 
 print_banner() {
     cat << "EOF"
-==============================================================================
-   _  ___                     _   __ __    _    ___     _                 
-  | |/ (_)__ _ ___  __ _  ___(_) / // /__ (_)  / _ \___(_)_  _____ ____   
-  | ' < / _ `/ _ \/  ' \/ -_)_  / _  / _ `/ /  / // / __/ / |/ / -_) __/   
- |_|\_\_\_,_/\___/_/_/_/\__(_) /_//_/\_,_/_/  /____/_/ /_/|___/\__/_/      
- Xiaomi Mi NoteBook Ultra / Pro / Max - Unified Driver & Power Button Fix
-==============================================================================
+====================================================================
+ Xiaomi Mi NoteBook Fingerprint & Power Button Installer
+====================================================================
 EOF
 }
 
@@ -42,14 +39,16 @@ show_help() {
 Usage: sudo ./install.sh [OPTIONS]
 
 Options:
-  -b, --build     Build driver from source instead of installing pre-compiled binaries
-  -y, --yes       Automatic yes to prompts; run non-interactively
-  -h, --help      Display this help message and exit
+  -b, --build       Compile driver from source instead of using pre-built binaries
+  -y, --yes         Automatic yes to prompts (non-interactive mode)
+  -v, --verbose     Show detailed command outputs
+  -h, --help        Show this help message and exit
 
 Supported Distributions:
-  - Fedora Linux (Workstation 39, 40, 41, 42, 45, etc.) / RHEL / CentOS
-  - Ubuntu (22.04 LTS, 24.04 LTS, etc.) / Debian / Pop!_OS / Linux Mint
+  - Fedora / RHEL / CentOS
+  - Ubuntu / Debian / Linux Mint / Pop!_OS
   - Arch Linux / Manjaro / EndeavourOS
+  - openSUSE / Generic Linux
 EOF
 }
 
@@ -64,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             ASSUME_YES=true
             shift
             ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -76,58 +79,128 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Root privilege check
+print_step() { echo -e "\n${BOLD}${BLUE}[$1]${NC} ${BOLD}$2${NC}"; }
+print_ok()   { echo -e "    ${GREEN}✔${NC} $*"; }
+print_warn() { echo -e "    ${YELLOW}!${NC} $*"; }
+print_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+run_cmd() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        "$@"
+    else
+        "$@" >/dev/null 2>&1
+    fi
+}
+
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
-        echo -e "${RED}${BOLD}[ERROR] This installer must be executed as root.${NC}" >&2
-        echo -e "Please re-run using: ${GREEN}sudo $0 $*${NC}" >&2
+        print_err "This installer must be run as root. Please run: sudo $0"
         exit 1
     fi
 }
 
-# Hardware verification
-check_hardware() {
-    echo -e "${BLUE}[*] Checking for FPC1022 fingerprint sensor...${NC}"
+detect_distro() {
+    if [[ ! -f /etc/os-release ]]; then
+        print_err "Cannot detect Linux distribution (/etc/os-release missing)."
+        exit 1
+    fi
+    . /etc/os-release
+    DISTRO_ID="${ID:-unknown}"
+    DISTRO_LIKE="${ID_LIKE:-}"
+    DISTRO_NAME="${PRETTY_NAME:-$DISTRO_ID}"
+}
+
+check_sensor() {
     if lsusb -d 10a5:9200 >/dev/null 2>&1; then
-        echo -e "${GREEN}[✔] Detected FPC1022 fingerprint sensor: $(lsusb -d 10a5:9200)${NC}"
+        print_ok "Detected FPC1022 fingerprint sensor (10a5:9200)"
     else
-        echo -e "${YELLOW}[!] WARNING: Sensor '10a5:9200' was not found in lsusb.${NC}"
-        echo -e "${YELLOW}    Please make sure the fingerprint sensor is enabled in your BIOS/UEFI.${NC}"
+        print_warn "Sensor '10a5:9200' not found in lsusb. Ensure it is enabled in BIOS/UEFI."
         if [[ "$ASSUME_YES" != "true" ]]; then
-            read -r -p "Do you still want to proceed with driver installation? [y/N]: " resp
+            read -r -p "    Continue installation anyway? [y/N]: " resp
             if [[ ! "$resp" =~ ^[yY]([eE][sS])?$ ]]; then
                 echo "Installation cancelled."
                 exit 0
             fi
         fi
     fi
+    print_ok "Detected system: ${DISTRO_NAME}"
 }
 
-# Distribution detection
-detect_distro() {
-    if [[ ! -f /etc/os-release ]]; then
-        echo -e "${RED}[ERROR] Cannot detect Linux distribution (/etc/os-release missing).${NC}" >&2
-        exit 1
+# ------------------------------------------------------------------------------
+# Driver Installation: Fedora / RHEL
+# ------------------------------------------------------------------------------
+install_fedora() {
+    local fedora_pkg="$SCRIPT_DIR/packages/fedora"
+    local deps_dir="/usr/local/lib64/fprint-deps"
+    local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
+    local backup_dir="/usr/local/share/fpc1022-backup"
+    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+
+    # Install fprintd daemon if missing
+    if ! rpm -q fprintd >/dev/null 2>&1 || ! rpm -q fprintd-pam >/dev/null 2>&1; then
+        run_cmd dnf install -y fprintd fprintd-pam
     fi
 
-    # Source os-release
-    . /etc/os-release
-    DISTRO_ID="${ID:-unknown}"
-    DISTRO_LIKE="${ID_LIKE:-}"
-    echo -e "${BLUE}[*] Detected Distribution: ${BOLD}${PRETTY_NAME:-$DISTRO_ID}${NC}"
-}
+    if [[ "$BUILD_MODE" == "true" ]] || [[ ! -f "$fedora_pkg/libfprint-2.so.2.0.0" ]]; then
+        install_from_source "fedora"
+        return
+    fi
 
-# Protect libfprint from dnf upgrade
-protect_dnf_packages() {
+    mkdir -p "$backup_dir"
+
+    # Clean up legacy backup in /usr/lib64 to prevent ldconfig symlink hijacking
+    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
+        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
+    fi
+
+    # Backup stock Fedora library once
+    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        cp -p "$target_lib" "$backup_lib"
+    fi
+
+    # Clean up any leftover stock backup file in /usr/lib64
+    rm -f /usr/lib64/*stock-backup*
+
+    # Deploy bundled runtime dependencies
+    mkdir -p "$deps_dir"
+    cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"
+    (
+        cd "$deps_dir"
+        ln -sf libblas.so.3.12.1 libblas.so.3; ln -sf libblas.so.3 libblas.so
+        ln -sf libgfortran.so.5.0.0 libgfortran.so.5; ln -sf libgfortran.so.5 libgfortran.so
+        ln -sf liblapack.so.3.12.1 liblapack.so.3; ln -sf liblapack.so.3 liblapack.so
+        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410; ln -sf libopencv_core.so.410 libopencv_core.so
+        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410; ln -sf libopencv_features2d.so.410 libopencv_features2d.so
+        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410; ln -sf libopencv_flann.so.410 libopencv_flann.so
+        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410; ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
+        ln -sf libtbb.so.12.17 libtbb.so.12; ln -sf libtbb.so.12 libtbb.so
+        [[ -f /usr/lib64/libcrypto.so.3 ]] && ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
+        [[ -f /usr/lib64/libssl.so.3 ]] && ln -sf /usr/lib64/libssl.so.3 libssl.so
+    )
+    echo "$deps_dir" > /etc/ld.so.conf.d/fprint.conf
+
+    # Deploy patched driver and enforce symlink
+    cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$target_lib"
+    ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
+
+    # SELinux contexts
+    if command -v chcon >/dev/null 2>&1; then
+        run_cmd chcon -t lib_t /usr/lib64/libfprint-2.so*
+        run_cmd chcon -R -t lib_t "$deps_dir"
+    fi
+    if command -v restorecon >/dev/null 2>&1; then
+        run_cmd restorecon -v /usr/lib64/libfprint-2.so*
+        run_cmd restorecon -Rv "$deps_dir"
+    fi
+
+    run_cmd ldconfig
+
+    # Shield libfprint from DNF upgrades
     local dnf_conf="/etc/dnf/dnf.conf"
     if [[ -f "$dnf_conf" ]]; then
-        echo -e "${BLUE}[*] Protecting libfprint from DNF system upgrades...${NC}"
         if grep -E -q "^[ \t]*excludepkgs[ \t]*=" "$dnf_conf"; then
             if ! grep -q "libfprint\*" "$dnf_conf"; then
                 sed -i -E 's/^[ \t]*excludepkgs[ \t]*=(.*)/excludepkgs=\1 libfprint*/' "$dnf_conf"
-                echo -e "${GREEN}[✔] Appended libfprint* to excludepkgs in $dnf_conf${NC}"
-            else
-                echo -e "${GREEN}[✔] DNF excludepkgs already configured for libfprint*.${NC}"
             fi
         else
             if grep -q "^\[main\]" "$dnf_conf"; then
@@ -135,27 +208,66 @@ protect_dnf_packages() {
             else
                 echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
             fi
-            echo -e "${GREEN}[✔] Added excludepkgs=libfprint* to $dnf_conf${NC}"
         fi
     fi
+
+    print_ok "Installed FPC1022 driver and runtime libraries"
+    print_ok "Protected driver from DNF system upgrades"
 }
 
-# Protect libfprint from apt upgrade
-protect_apt_packages() {
-    echo -e "${BLUE}[*] Locking libfprint packages in APT...${NC}"
-    apt-mark hold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
+# ------------------------------------------------------------------------------
+# Driver Installation: Debian / Ubuntu
+# ------------------------------------------------------------------------------
+install_debian() {
+    local deb_pkg="$SCRIPT_DIR/packages/deb/libfprint-fpc1022_1.94.100_amd64.deb"
+    local installed=false
+
+    if [[ "$BUILD_MODE" != "true" && -f "$deb_pkg" ]]; then
+        run_cmd apt-get update -y
+        if run_cmd apt-get install -y "$deb_pkg" fprintd; then
+            installed=true
+        fi
+    fi
+
+    if [[ "$installed" != "true" ]]; then
+        install_from_source "debian"
+    fi
+
+    # Pin in apt
+    run_cmd apt-mark hold libfprint-2-2 libfprint-fpc1022
+
+    # Enable PAM auth
+    if command -v pam-auth-update >/dev/null 2>&1; then
+        run_cmd pam-auth-update --enable fingerprint
+    fi
+
+    print_ok "Installed FPC1022 driver"
+    print_ok "Protected driver from APT package updates"
 }
 
-# Protect libfprint from pacman upgrade
-protect_arch_packages() {
+# ------------------------------------------------------------------------------
+# Driver Installation: Arch Linux
+# ------------------------------------------------------------------------------
+install_arch() {
+    local arch_pkg="$SCRIPT_DIR/packages/arch/libfprint-fpc1022-1.94.100-1-x86_64.pkg.tar.zst"
+    local installed=false
+
+    if [[ "$BUILD_MODE" != "true" && -f "$arch_pkg" ]]; then
+        run_cmd pacman -S --needed --noconfirm fprintd
+        if run_cmd pacman -U --noconfirm "$arch_pkg"; then
+            installed=true
+        fi
+    fi
+
+    if [[ "$installed" != "true" ]]; then
+        install_from_source "arch"
+    fi
+
+    # Pin in pacman.conf
     if [[ -f /etc/pacman.conf ]]; then
-        echo -e "${BLUE}[*] Protecting libfprint from Pacman upgrades...${NC}"
         if grep -E -q "^[ \t]*IgnorePkg" /etc/pacman.conf; then
             if ! grep -q "\blibfprint\b" /etc/pacman.conf; then
                 sed -i -E 's/^[ \t]*IgnorePkg[ \t]*=[ \t]*(.*)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
-                echo -e "${GREEN}[✔] Appended libfprint to IgnorePkg in /etc/pacman.conf${NC}"
-            else
-                echo -e "${GREEN}[✔] Pacman IgnorePkg already configured for libfprint.${NC}"
             fi
         else
             if grep -q "^\[options\]" /etc/pacman.conf; then
@@ -163,505 +275,273 @@ protect_arch_packages() {
             else
                 echo -e "\n[options]\nIgnorePkg = libfprint" >> /etc/pacman.conf
             fi
-            echo -e "${GREEN}[✔] Added IgnorePkg = libfprint to /etc/pacman.conf${NC}"
         fi
     fi
+
+    print_ok "Installed FPC1022 driver"
+    print_ok "Protected driver from Pacman system updates"
 }
 
-# Fedora / RHEL installation
-install_fedora() {
-    echo -e "${BLUE}[*] Preparing installation for Fedora/RHEL...${NC}"
-    
-    # Ensure fprintd and fprintd-pam packages are present
-    if ! rpm -q fprintd >/dev/null 2>&1 || ! rpm -q fprintd-pam >/dev/null 2>&1; then
-        echo -e "${BLUE}[*] Installing fprintd and fprintd-pam packages...${NC}"
-        dnf install -y fprintd fprintd-pam
-    fi
-
-    if [[ "$BUILD_MODE" == "true" ]]; then
-        echo -e "${BLUE}[*] Source build mode requested...${NC}"
-        install_from_source_fedora
-        return
-    fi
-
-    echo -e "${BLUE}[*] Installing pre-compiled FPC1022 libfprint with SIGFM matcher...${NC}"
-    
-    FEDORA_PKG_DIR="$SCRIPT_DIR/packages/fedora"
-    DEPS_DIR="/usr/local/lib64/fprint-deps"
-    TARGET_LIB="/usr/lib64/libfprint-2.so.2.0.0"
-    BACKUP_DIR="/usr/local/share/fpc1022-backup"
-    BACKUP_LIB="$BACKUP_DIR/libfprint-2.so.2.0.0.stock-backup"
-
-    if [[ ! -f "$FEDORA_PKG_DIR/libfprint-2.so.2.0.0" ]]; then
-        echo -e "${RED}[ERROR] Fedora pre-compiled binary missing at $FEDORA_PKG_DIR/libfprint-2.so.2.0.0${NC}" >&2
-        echo -e "${YELLOW}Falling back to building from source...${NC}"
-        install_from_source_fedora
-        return
-    fi
-
-    mkdir -p "$BACKUP_DIR"
-
-    # Migrate any legacy backup out of /usr/lib64 so ldconfig never binds libfprint-2.so.2 to it
-    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
-        echo -e "${BLUE}[*] Moving stock backup out of /usr/lib64 to ${BACKUP_DIR}...${NC}"
-        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$BACKUP_LIB"
-    fi
-
-    # Backup stock Fedora libfprint library if not already backed up
-    if [[ -f "$TARGET_LIB" && ! -f "$BACKUP_LIB" ]]; then
-        echo -e "${BLUE}[*] Backing up stock system libfprint to ${BACKUP_LIB}...${NC}"
-        cp -p "$TARGET_LIB" "$BACKUP_LIB"
-    fi
-
-    # Clean up any leftover backup file in /usr/lib64 to ensure ldconfig resolves to our patched driver
-    rm -f /usr/lib64/*stock-backup*
-
-    # Set up OpenCV / SIGFM dependency directory
-    mkdir -p "$DEPS_DIR"
-    echo -e "${BLUE}[*] Deploying runtime dependencies to ${DEPS_DIR}...${NC}"
-    cp -p "$FEDORA_PKG_DIR/fprint-deps/"*.so.* "$DEPS_DIR/"
-
-    # Create dependency symlinks
-    (
-        cd "$DEPS_DIR"
-        ln -sf libblas.so.3.12.1 libblas.so.3
-        ln -sf libblas.so.3 libblas.so
-        ln -sf libgfortran.so.5.0.0 libgfortran.so.5
-        ln -sf libgfortran.so.5 libgfortran.so
-        ln -sf liblapack.so.3.12.1 liblapack.so.3
-        ln -sf liblapack.so.3 liblapack.so
-        ln -sf libopencv_core.so.4.10.0 libopencv_core.so.410
-        ln -sf libopencv_core.so.410 libopencv_core.so
-        ln -sf libopencv_features2d.so.4.10.0 libopencv_features2d.so.410
-        ln -sf libopencv_features2d.so.410 libopencv_features2d.so
-        ln -sf libopencv_flann.so.4.10.0 libopencv_flann.so.410
-        ln -sf libopencv_flann.so.410 libopencv_flann.so
-        ln -sf libopencv_imgproc.so.4.10.0 libopencv_imgproc.so.410
-        ln -sf libopencv_imgproc.so.410 libopencv_imgproc.so
-        ln -sf libtbb.so.12.17 libtbb.so.12
-        ln -sf libtbb.so.12 libtbb.so
-        
-        # Link host system crypto and ssl if available
-        if [[ -f /usr/lib64/libcrypto.so.3 ]]; then
-            ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
-        fi
-        if [[ -f /usr/lib64/libssl.so.3 ]]; then
-            ln -sf /usr/lib64/libssl.so.3 libssl.so
-        fi
-    )
-
-    # Configure dynamic linker ld.so.conf.d
-    echo "$DEPS_DIR" > /etc/ld.so.conf.d/fprint.conf
-
-    # Deploy patched libfprint
-    echo -e "${BLUE}[*] Installing driver library to /usr/lib64/...${NC}"
-    cp -p "$FEDORA_PKG_DIR/libfprint-2.so.2.0.0" "$TARGET_LIB"
-    ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-
-    # SELinux Permissions
-    if command -v chcon >/dev/null 2>&1; then
-        echo -e "${BLUE}[*] Configuring SELinux file contexts (lib_t)...${NC}"
-        chcon -t lib_t /usr/lib64/libfprint-2.so* 2>/dev/null || true
-        chcon -R -t lib_t "$DEPS_DIR" 2>/dev/null || true
-    fi
-    if command -v restorecon >/dev/null 2>&1; then
-        restorecon -v /usr/lib64/libfprint-2.so* 2>/dev/null || true
-        restorecon -Rv "$DEPS_DIR" 2>/dev/null || true
-    fi
-
-    # Update ldconfig
-    ldconfig
-
-    # Protect package from being overwritten by dnf upgrade
-    protect_dnf_packages
-}
-
-# Ubuntu / Debian installation
-install_ubuntu_debian() {
-    echo -e "${BLUE}[*] Preparing installation for Ubuntu/Debian...${NC}"
-    
-    if [[ "$BUILD_MODE" == "true" ]]; then
-        install_from_source_debian
-        return
-    fi
-
-    local deb_pkg="$SCRIPT_DIR/packages/deb/libfprint-fpc1022_1.94.100_amd64.deb"
-    local installed=false
-    if [[ -f "$deb_pkg" ]]; then
-        echo -e "${BLUE}[*] Attempting installation of pre-compiled Debian package...${NC}"
-        apt-get update -y
-        if apt-get install -y "$deb_pkg" fprintd 2>/dev/null; then
-            installed=true
-            protect_apt_packages
-        else
-            echo -e "${YELLOW}[!] Pre-compiled package dependencies not met on this release.${NC}"
-            echo -e "${YELLOW}    Falling back to building from source for native compatibility...${NC}"
-        fi
-    fi
-
-    if [[ "$installed" != "true" ]]; then
-        install_from_source_debian
-    fi
-
-    # Enable PAM authentication
-    if command -v pam-auth-update >/dev/null 2>&1; then
-        echo -e "${BLUE}[*] Enabling PAM fingerprint authentication...${NC}"
-        pam-auth-update --enable fingerprint 2>/dev/null || true
-    fi
-}
-
-# Arch Linux installation
-install_arch() {
-    echo -e "${BLUE}[*] Preparing installation for Arch Linux...${NC}"
-
-    local arch_pkg="$SCRIPT_DIR/packages/arch/libfprint-fpc1022-1.94.100-1-x86_64.pkg.tar.zst"
-    local installed=false
-    if [[ "$BUILD_MODE" != "true" && -f "$arch_pkg" ]]; then
-        echo -e "${BLUE}[*] Attempting installation of pre-compiled Arch package...${NC}"
-        pacman -S --needed --noconfirm fprintd
-        if pacman -U --noconfirm "$arch_pkg" 2>/dev/null; then
-            installed=true
-            protect_arch_packages
-        else
-            echo -e "${YELLOW}[!] Pre-compiled package incompatible with current system libraries.${NC}"
-            echo -e "${YELLOW}    Falling back to building from source for native compatibility...${NC}"
-        fi
-    fi
-
-    if [[ "$installed" != "true" ]]; then
-        install_from_source_arch
-    fi
-}
-
-# Source build for Fedora
-install_from_source_fedora() {
-    echo -e "${BLUE}[*] Installing build dependencies via DNF...${NC}"
-    dnf install -y meson ninja-build gcc gcc-c++ glib2-devel libgusb-devel pixman-devel openssl-devel libgudev-devel polkit-devel systemd-devel doctest-devel opencv-devel fprintd fprintd-pam
-    
+# ------------------------------------------------------------------------------
+# Universal Driver Source Build (Fedora, Debian, Arch, openSUSE, Generic)
+# ------------------------------------------------------------------------------
+install_from_source() {
+    local family="$1"
     local src_dir="$SCRIPT_DIR/src/libfprint"
+    local lib_dir="/usr/lib"
+    [[ -d /usr/lib64 ]] && lib_dir="/usr/lib64"
+
     if [[ ! -d "$src_dir" ]]; then
-        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
+        print_err "Source tree not found at $src_dir"
         exit 1
     fi
 
-    # Backup stock Fedora libfprint library if not already backed up
-    local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
+    print_ok "Installing build prerequisites for ${family}..."
+    case "$family" in
+        fedora)
+            run_cmd dnf install -y meson ninja-build gcc gcc-c++ glib2-devel libgusb-devel \
+                pixman-devel openssl-devel libgudev-devel polkit-devel systemd-devel \
+                doctest-devel opencv-devel fprintd fprintd-pam
+            ;;
+        debian)
+            run_cmd apt-get update -y
+            run_cmd apt-get install -y meson ninja-build build-essential libglib2.0-dev libgusb-dev \
+                libpixman-1-dev libssl-dev libgudev-1.0-dev libpolkit-gobject-1-dev doctest-dev \
+                libopencv-dev fprintd
+            ;;
+        arch)
+            run_cmd pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl \
+                libgudev polkit doctest opencv fprintd
+            ;;
+        suse)
+            run_cmd zypper --non-interactive install meson ninja gcc gcc-c++ glib2-devel \
+                libgusb-devel libpixman-1-0-devel libopenssl-devel libgudev-1_0-devel polkit-devel \
+                systemd-devel doctest-devel opencv-devel fprintd fprintd-pam
+            ;;
+        generic)
+            # Verify essentials are present
+            for tool in meson ninja gcc; do
+                if ! command -v "$tool" >/dev/null 2>&1; then
+                    print_err "Required build tool '$tool' is missing. Please install build tools and OpenCV dev libraries."
+                    exit 1
+                fi
+            done
+            ;;
+    esac
+
+    # Isolate backup if stock lib exists
     local backup_dir="/usr/local/share/fpc1022-backup"
-    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
-    mkdir -p "$backup_dir"
-    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
-        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
+    local target_lib="${lib_dir}/libfprint-2.so.2.0.0"
+    if [[ -f "$target_lib" && ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
+        mkdir -p "$backup_dir"
+        cp -p "$target_lib" "$backup_dir/libfprint-2.so.2.0.0.stock-backup"
     fi
-    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
-        echo -e "${BLUE}[*] Backing up stock system libfprint to ${backup_lib}...${NC}"
-        cp -p "$target_lib" "$backup_lib"
-    fi
-    rm -f /usr/lib64/*stock-backup*
+    rm -f "${lib_dir}/"*stock-backup*
 
-    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
     local build_tmp
-    build_tmp="$(mktemp -d /tmp/fpc1022_fedora_build.XXXXXX)"
+    build_tmp="$(mktemp -d /tmp/fpc1022_build.XXXXXX)"
     cp -r "$src_dir" "$build_tmp/src"
 
     (
         cd "$build_tmp/src"
-        meson setup build --prefix=/usr --libdir=/usr/lib64 -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
+        meson setup build --prefix=/usr --libdir="$lib_dir" -Ddrivers=all -Ddoc=false \
+            -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
         ninja -C build
-        echo -e "${BLUE}[*] Installing compiled driver to /usr/lib64/...${NC}"
         ninja -C build install
     )
     rm -rf "$build_tmp"
 
-    # SELinux Permissions
     if command -v chcon >/dev/null 2>&1; then
-        echo -e "${BLUE}[*] Configuring SELinux file contexts (lib_t)...${NC}"
-        chcon -t lib_t /usr/lib64/libfprint-2.so* 2>/dev/null || true
+        run_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
     fi
     if command -v restorecon >/dev/null 2>&1; then
-        restorecon -v /usr/lib64/libfprint-2.so* 2>/dev/null || true
+        run_cmd restorecon -v "${lib_dir}/libfprint-2.so"*
     fi
 
-    ldconfig
-    protect_dnf_packages
+    run_cmd ldconfig
+    print_ok "Built and installed driver from source"
 }
 
-# Source build for Debian/Ubuntu
-install_from_source_debian() {
-    echo -e "${BLUE}[*] Installing build dependencies via APT...${NC}"
-    apt-get update -y
-    apt-get install -y meson ninja-build build-essential libglib2.0-dev libgusb-dev libpixman-1-dev libssl-dev libgudev-1.0-dev libpolkit-gobject-1-dev doctest-dev libopencv-dev fprintd
-    
-    local src_dir="$SCRIPT_DIR/src/libfprint"
-    if [[ ! -d "$src_dir" ]]; then
-        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
-        exit 1
-    fi
-
-    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
-    local build_tmp
-    build_tmp="$(mktemp -d /tmp/fpc1022_debian_build.XXXXXX)"
-    cp -r "$src_dir" "$build_tmp/src"
-
-    (
-        cd "$build_tmp/src"
-        meson setup build --prefix=/usr -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
-        ninja -C build
-        echo -e "${BLUE}[*] Installing compiled driver to /usr/...${NC}"
-        ninja -C build install
-    )
-    rm -rf "$build_tmp"
-
-    ldconfig
-    protect_apt_packages
-}
-
-# Source build for Arch Linux
-install_from_source_arch() {
-    echo -e "${BLUE}[*] Installing build dependencies via Pacman...${NC}"
-    pacman -S --needed --noconfirm meson ninja gcc glib2 libgusb pixman openssl libgudev polkit doctest opencv fprintd
-    
-    local src_dir="$SCRIPT_DIR/src/libfprint"
-    if [[ ! -d "$src_dir" ]]; then
-        echo -e "${RED}[ERROR] Source tree missing at $src_dir${NC}" >&2
-        exit 1
-    fi
-
-    echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
-    local build_tmp
-    build_tmp="$(mktemp -d /tmp/fpc1022_arch_build.XXXXXX)"
-    cp -r "$src_dir" "$build_tmp/src"
-
-    (
-        cd "$build_tmp/src"
-        meson setup build --prefix=/usr --libdir=/usr/lib -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
-        ninja -C build
-        echo -e "${BLUE}[*] Installing compiled driver to /usr/lib/...${NC}"
-        ninja -C build install
-    )
-    rm -rf "$build_tmp"
-
-    ldconfig
-    protect_arch_packages
-}
-
-# Configure power button handling to prevent accidental suspend on sensor touch
+# ------------------------------------------------------------------------------
+# Power Button Hardware Initializer & Policy Setup
+# ------------------------------------------------------------------------------
 configure_power_button() {
-    echo -e "${BLUE}[*] Configuring power button handling (coexistence with fingerprint sensor)...${NC}"
-    
-    # 1. Systemd logind configuration
-    local logind_conf_dir="/etc/systemd/logind.conf.d"
+    # 1. logind policy: Instant response & honor desktop inhibitors
+    local logind_dir="/etc/systemd/logind.conf.d"
     local power_conf="$SCRIPT_DIR/configs/10-power-button.conf"
-    
     if [[ -f "$power_conf" ]]; then
-        mkdir -p "$logind_conf_dir"
-        echo -e "${BLUE}[*] Installing logind power button policy to ${logind_conf_dir}/10-power-button.conf...${NC}"
-        cp -p "$power_conf" "$logind_conf_dir/10-power-button.conf"
-        
-        # Reload systemd-logind to pick up new configuration without dropping active sessions
+        mkdir -p "$logind_dir"
+        cp -p "$power_conf" "$logind_dir/10-power-button.conf"
         if command -v systemctl >/dev/null 2>&1; then
-            echo -e "${BLUE}[*] Reloading systemd-logind...${NC}"
-            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || systemctl restart systemd-logind 2>/dev/null || true
+            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
         fi
-        echo -e "${GREEN}[✔] Systemd logind power button handling configured.${NC}"
-    else
-        echo -e "${YELLOW}[!] Warning: $power_conf not found, skipping logind configuration.${NC}"
+        print_ok "Configured instant power button response (logind)"
     fi
 
-    # 2. Add target user to input group for direct power button & input event access
-    if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
-        echo -e "${BLUE}[*] Adding user '${TARGET_USER}' to the 'input' group...${NC}"
-        usermod -a -G input "$TARGET_USER" 2>/dev/null || true
-        echo -e "${GREEN}[✔] Added ${TARGET_USER} to input group.${NC}"
+    # 2. Add user to input group if group exists
+    if getent group input >/dev/null 2>&1 && [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
+        run_cmd usermod -a -G input "$TARGET_USER"
+        print_ok "Added user '${TARGET_USER}' to 'input' group"
     fi
 
-    # 3. Clean up any previous dconf power-button overrides so desktop settings remain 100% user-determined
+    # 3. Clean up legacy dconf locks so desktop power action remains user-configurable
     local dconf_dir="/etc/dconf/db/local.d"
     if [[ -f "$dconf_dir/01-power-button" || -f "$dconf_dir/locks/01-power-button" ]]; then
-        echo -e "${BLUE}[*] Removing dconf overrides to leave power button action user-configurable in Desktop Settings...${NC}"
         rm -f "$dconf_dir/01-power-button" "$dconf_dir/locks/01-power-button"
         if command -v dconf >/dev/null 2>&1; then
-            dconf update 2>/dev/null || true
+            run_cmd dconf update
         fi
-        echo -e "${GREEN}[✔] Power button action left to user preference (GNOME/KDE Settings).${NC}"
+        print_ok "Reset desktop power overrides (managed in GNOME/KDE Settings)"
     fi
 
-    # 4. Compile and install early hardware initializer (fpc1022-wake)
-    # The physical power button tactile dome switch is integrated into the FPC1022 MCU.
-    # On cold boot, the MCU starts in sleep mode until S0 state is signaled via USB control transfer.
-    echo -e "${BLUE}[*] Setting up FPC1022 hardware power button wake components...${NC}"
+    # 4. Hardware wake utility (fpc1022-wake)
     local wake_bin="/usr/local/bin/fpc1022-wake"
     local wake_c="$SCRIPT_DIR/tools/fpc1022-wake.c"
     local wake_prebuilt="$SCRIPT_DIR/tools/fpc1022-wake"
-    local wake_installed=false
+    local wake_ok=false
 
     if command -v gcc >/dev/null 2>&1 && [[ -f "$wake_c" ]]; then
-        echo -e "${BLUE}[*] Compiling hardware initializer $wake_bin...${NC}"
         local libusb_flags
         libusb_flags="$(pkg-config --cflags --libs libusb-1.0 2>/dev/null || echo "-I/usr/include/libusb-1.0 -lusb-1.0")"
         if gcc -O2 -Wall "$wake_c" $libusb_flags -o "$wake_bin" 2>/dev/null; then
             chmod 755 "$wake_bin"
-            wake_installed=true
-            echo -e "${GREEN}[✔] Compiled and installed $wake_bin.${NC}"
+            wake_ok=true
         fi
     fi
 
-    if [[ "$wake_installed" != "true" && -f "$wake_prebuilt" ]]; then
-        echo -e "${BLUE}[*] Installing prebuilt hardware initializer binary to $wake_bin...${NC}"
+    if [[ "$wake_ok" != "true" && -f "$wake_prebuilt" ]]; then
         cp -p "$wake_prebuilt" "$wake_bin"
         chmod 755 "$wake_bin"
-        wake_installed=true
-        echo -e "${GREEN}[✔] Installed prebuilt $wake_bin.${NC}"
+        wake_ok=true
     fi
 
-    # 5. Install udev access rule for FPC1022 USB device (10a5:9200)
-    local udev_rule="$SCRIPT_DIR/configs/99-fpc1022-wake.rules"
-    if [[ -f "$udev_rule" ]]; then
-        echo -e "${BLUE}[*] Installing udev rule to /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
-        cp -p "$udev_rule" /etc/udev/rules.d/99-fpc1022-wake.rules
-        chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
-        echo -e "${GREEN}[✔] Installed udev access rule for FPC1022.${NC}"
-    fi
-
-    # 6. Install systemd boot service fpc1022-wake.service
-    local wake_service="$SCRIPT_DIR/configs/fpc1022-wake.service"
-    if [[ -f "$wake_service" ]]; then
-        echo -e "${BLUE}[*] Installing systemd service /etc/systemd/system/fpc1022-wake.service...${NC}"
-        cp -p "$wake_service" /etc/systemd/system/fpc1022-wake.service
-        chmod 644 /etc/systemd/system/fpc1022-wake.service
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl daemon-reload 2>/dev/null || true
-            systemctl enable fpc1022-wake.service 2>/dev/null || true
-            echo -e "${GREEN}[✔] Enabled fpc1022-wake.service for cold boot initialization.${NC}"
+    if [[ "$wake_ok" == "true" ]]; then
+        # udev rule
+        if [[ -f "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" ]]; then
+            cp -p "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" /etc/udev/rules.d/99-fpc1022-wake.rules
+            chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
         fi
-    fi
 
-    # 7. Install systemd-sleep hook for wake from suspend / hibernate
-    local sleep_script="$SCRIPT_DIR/configs/fpc1022-sleep-wake"
-    if [[ -d /usr/lib/systemd/system-sleep && -f "$sleep_script" ]]; then
-        echo -e "${BLUE}[*] Installing system-sleep resume hook to /usr/lib/systemd/system-sleep/fpc1022-wake...${NC}"
-        cp -p "$sleep_script" /usr/lib/systemd/system-sleep/fpc1022-wake
-        chmod 755 /usr/lib/systemd/system-sleep/fpc1022-wake
-        echo -e "${GREEN}[✔] Installed sleep resume hook.${NC}"
-    fi
+        # systemd boot service
+        if [[ -f "$SCRIPT_DIR/configs/fpc1022-wake.service" ]]; then
+            cp -p "$SCRIPT_DIR/configs/fpc1022-wake.service" /etc/systemd/system/fpc1022-wake.service
+            chmod 644 /etc/systemd/system/fpc1022-wake.service
+            if command -v systemctl >/dev/null 2>&1; then
+                run_cmd systemctl daemon-reload
+                run_cmd systemctl enable fpc1022-wake.service
+            fi
+        fi
 
-    # 8. Trigger immediate hardware initialization now
-    if [[ -x "$wake_bin" ]]; then
-        echo -e "${BLUE}[*] Triggering immediate hardware wake to S0 state...${NC}"
+        # resume sleep hook
+        if [[ -d /usr/lib/systemd/system-sleep && -f "$SCRIPT_DIR/configs/fpc1022-sleep-wake" ]]; then
+            cp -p "$SCRIPT_DIR/configs/fpc1022-sleep-wake" /usr/lib/systemd/system-sleep/fpc1022-wake
+            chmod 755 /usr/lib/systemd/system-sleep/fpc1022-wake
+        fi
+
+        # Trigger immediate hardware wake
         "$wake_bin" 2>/dev/null || true
-        echo -e "${GREEN}[✔] FPC1022 hardware initialized into S0 state.${NC}"
+        print_ok "Installed hardware wake service (power button ready on boot & resume)"
     fi
 }
 
-# Polkit Security Configuration: Enforce password authentication for fingerprint deletion & enrollment
-configure_polkit_security() {
-    echo -e "${BLUE}[*] Configuring PolicyKit security (password protection for fingerprint credentials)...${NC}"
+# ------------------------------------------------------------------------------
+# Security Policy (Polkit)
+# ------------------------------------------------------------------------------
+configure_security() {
     local polkit_rule="$SCRIPT_DIR/configs/50-fprintd-auth.rules"
     local polkit_dir="/etc/polkit-1/rules.d"
-    
     if [[ -d "$polkit_dir" && -f "$polkit_rule" ]]; then
-        echo -e "${BLUE}[*] Installing Polkit rule to ${polkit_dir}/50-fprintd-auth.rules...${NC}"
         cp -p "$polkit_rule" "$polkit_dir/50-fprintd-auth.rules"
         chmod 644 "$polkit_dir/50-fprintd-auth.rules"
-        echo -e "${GREEN}[✔] Polkit security rule active: Sudo/admin password required to delete or enroll prints.${NC}"
+        print_ok "Enabled PolicyKit rule (password required to delete/enroll prints)"
     fi
 }
 
-# Post-install service reload and validation
+# ------------------------------------------------------------------------------
+# Finalize & Service Reload
+# ------------------------------------------------------------------------------
 finalize_installation() {
-    echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
-    udevadm control --reload 2>/dev/null || true
-    udevadm trigger 2>/dev/null || true
-    
-    systemctl restart fprintd.service || {
-        echo -e "${YELLOW}[!] Warning: fprintd.service restart returned non-zero, checking status...${NC}"
-    }
-    
+    run_cmd udevadm control --reload
+    run_cmd udevadm trigger
+    run_cmd systemctl restart fprintd.service
     sleep 1
 
-    # Optional authselect configuration for Fedora
+    # Fedora authselect fingerprint enable
     if command -v authselect >/dev/null 2>&1; then
         if authselect current >/dev/null 2>&1; then
             if ! authselect current | grep -q "with-fingerprint"; then
-                echo -e "${BLUE}[*] Enabling fingerprint auth in authselect...${NC}"
-                authselect enable-feature with-fingerprint 2>/dev/null || true
-                authselect apply-changes 2>/dev/null || true
+                run_cmd authselect enable-feature with-fingerprint
+                run_cmd authselect apply-changes
+                print_ok "Enabled fingerprint PAM feature in authselect"
             fi
         fi
     fi
-
-    # Configure Polkit security policy (password required to delete/enroll)
-    configure_polkit_security
-
-    # Configure power button handling
-    configure_power_button
-
-    echo ""
-    echo -e "${GREEN}==============================================================================${NC}"
-    echo -e "${GREEN}${BOLD}     [✔] UNIFIED INSTALLATION COMPLETE!${NC}"
-    echo -e "${GREEN}${BOLD}         - FPC1022 Fingerprint Driver: Installed & Running${NC}"
-    echo -e "${GREEN}${BOLD}         - Biometric Security Policy: Password-Guarded Deletion/Enrollment${NC}"
-    echo -e "${GREEN}${BOLD}         - Power Button Hardware Wake: Initialized & Enabled at Boot/Resume${NC}"
-    echo -e "${GREEN}${BOLD}         - Power Button Policy: Configured (Instant Response & Desktop-Managed)${NC}"
-    echo -e "${GREEN}==============================================================================${NC}"
-    echo ""
-    echo -e "${BOLD}Summary of Applied Changes:${NC}"
-    echo -e "  • ${CYAN}Biometric Stack:${NC} Libfprint patched with FPC1022 Match-on-Host & SIGFM OpenCV matcher"
-    echo -e "  • ${CYAN}Security Policy:${NC} Polkit rule active (sudo/admin password required to enroll or delete fingerprints)"
-    echo -e "  • ${CYAN}Cold-Boot Wake:${NC} /usr/local/bin/fpc1022-wake, udev rule & systemd service (MCU S0 working state)"
-    echo -e "  • ${CYAN}Sleep/Resume Hook:${NC} /usr/lib/systemd/system-sleep/fpc1022-wake (immediate power button on resume)"
-    echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors (HoldoffTimeoutSec=0, no delay)"
-    echo -e "  • ${CYAN}Desktop Action:${NC} User-determined (manageable via GNOME/KDE Power Settings: Nothing/Suspend/PowerOff)"
-    echo -e "  • ${CYAN}User Group:${NC} Added '${BOLD}${TARGET_USER}${NC}' to 'input' group"
-    echo ""
-    echo -e "${BOLD}Next Steps for Enrollment & Verification:${NC}"
-    echo -e "  1. Enroll a finger for your user (${BOLD}${TARGET_USER}${NC}):"
-    echo -e "     ${CYAN}fprintd-enroll ${TARGET_USER}${NC}"
-    echo -e "     (or specific finger: ${CYAN}fprintd-enroll -f right-index-finger ${TARGET_USER}${NC})"
-    echo ""
-    echo -e "  2. Test and verify your enrolled fingerprint:"
-    echo -e "     ${CYAN}fprintd-verify ${TARGET_USER}${NC}"
-    echo ""
-    echo -e "  3. Desktop GUI Integration:"
-    echo -e "     - ${BOLD}GNOME:${NC} Settings -> Users -> Fingerprint Login"
-    echo -e "     - ${BOLD}KDE:${NC} System Settings -> Users -> Fingerprint"
-    echo ""
-    echo -e "  4. Need to revert? Simply run:"
-    echo -e "     ${CYAN}sudo ./uninstall.sh${NC}"
-    echo ""
+    print_ok "Reloaded system services and restarted fprintd"
 }
 
-# Main script flow
+# ------------------------------------------------------------------------------
+# Main Flow
+# ------------------------------------------------------------------------------
 main() {
     print_banner
     check_root
-    check_hardware
-    detect_distro
 
+    print_step "1/5" "Checking system & hardware..."
+    detect_distro
+    check_sensor
+
+    print_step "2/5" "Installing fingerprint driver..."
     case "$DISTRO_ID" in
         fedora|rhel|centos)
             install_fedora
             ;;
         ubuntu|debian|linuxmint|pop)
-            install_ubuntu_debian
+            install_debian
             ;;
         arch|manjaro|endeavouros)
             install_arch
+            ;;
+        opensuse*|sles)
+            install_from_source "suse"
             ;;
         *)
             if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
                 install_fedora
             elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]]; then
-                install_ubuntu_debian
+                install_debian
             elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
                 install_arch
+            elif [[ "$DISTRO_LIKE" =~ (suse) ]]; then
+                install_from_source "suse"
             else
-                echo -e "${YELLOW}[!] Unrecognized distribution '$DISTRO_ID'. Falling back to source build...${NC}"
-                install_from_source_debian
+                install_from_source "generic"
             fi
             ;;
     esac
 
+    print_step "3/5" "Setting up power button handling..."
+    configure_power_button
+
+    print_step "4/5" "Applying security policies..."
+    configure_security
+
+    print_step "5/5" "Finalizing system services..."
     finalize_installation
+
+    echo ""
+    echo -e "${GREEN}====================================================================${NC}"
+    echo -e "${GREEN}${BOLD}  ✔ Installation Complete!${NC}"
+    echo -e "${GREEN}====================================================================${NC}"
+    echo ""
+    echo -e "${BOLD}Next Steps:${NC}"
+    echo -e "  1. Enroll your fingerprint:"
+    echo -e "     ${BLUE}fprintd-enroll${NC}"
+    echo ""
+    echo -e "  2. Verify your fingerprint:"
+    echo -e "     ${BLUE}fprintd-verify${NC}"
+    echo ""
+    echo -e "  Or configure visually in ${BOLD}Settings → Users → Fingerprint Login${NC}."
+    echo ""
 }
 
 main "$@"

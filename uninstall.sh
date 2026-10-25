@@ -1,31 +1,44 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Xiaomi Mi NoteBook Ultra / Pro / Max - Linux Driver & Power Button Uninstaller
-# Safely reverts system back to stock distribution libfprint & clean power state
+# Xiaomi Mi NoteBook Ultra / Pro / Max - Fingerprint & Power Button Uninstaller
+# Restores original distribution driver and cleanly removes all custom configs
+# Author: Sahidul Haque (sahid-code404) & Contributors
+# License: LGPL-2.1-or-later
 # ==============================================================================
 
 set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+print_banner() {
+    cat << "EOF"
+====================================================================
+ Xiaomi Mi NoteBook Fingerprint & Power Button Uninstaller
+====================================================================
+EOF
+}
+
+print_step() { echo -e "\n${BOLD}${BLUE}[$1]${NC} ${BOLD}$2${NC}"; }
+print_ok()   { echo -e "    ${GREEN}✔${NC} $*"; }
+print_warn() { echo -e "    ${YELLOW}!${NC} $*"; }
+print_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+run_cmd() {
+    "$@" >/dev/null 2>&1 || true
+}
+
 if [[ "$(id -u)" -ne 0 ]]; then
-    echo -e "${RED}[ERROR] This uninstaller must be run as root.${NC}" >&2
-    echo -e "Please run: ${GREEN}sudo $0${NC}" >&2
+    print_err "This uninstaller must be run as root. Please run: sudo $0"
     exit 1
 fi
 
-echo -e "${YELLOW}==============================================================================${NC}"
-echo -e "${YELLOW}${BOLD}     FPC1022 DRIVER & POWER BUTTON FIX UNINSTALLER / ROLLBACK${NC}"
-echo -e "${YELLOW}==============================================================================${NC}"
-echo ""
-
 if [[ ! -f /etc/os-release ]]; then
-    echo -e "${RED}[ERROR] /etc/os-release not found. Cannot determine package manager.${NC}" >&2
+    print_err "Cannot detect Linux distribution (/etc/os-release missing)."
     exit 1
 fi
 
@@ -34,155 +47,122 @@ DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
 
 revert_fedora() {
-    echo -e "${BLUE}[*] Reverting Fedora/RHEL system packages...${NC}"
-
-    # Remove libfprint from dnf.conf excludepkgs
+    # 1. Remove libfprint exclusion from dnf.conf
     local dnf_conf="/etc/dnf/dnf.conf"
     if [[ -f "$dnf_conf" ]]; then
-        echo -e "${BLUE}[*] Removing libfprint exclusion from $dnf_conf...${NC}"
         sed -i -E 's/\blibfprint\*[ \t]*//g' "$dnf_conf"
-        # Clean up dangling empty excludepkgs=
         sed -i -E '/^[ \t]*excludepkgs[ \t]*=[ \t]*$/d' "$dnf_conf"
     fi
 
-    # Restore stock libfprint (do not remove system packages)
+    # 2. Restore stock libfprint (do NOT delete system packages)
     local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
     if [[ -f "$backup_lib" ]]; then
-        echo -e "${BLUE}[*] Restoring stock libfprint from backup...${NC}"
         cp -p "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-        echo -e "${GREEN}[✔] Restored /usr/lib64/libfprint-2.so.2.0.0 from stock backup.${NC}"
+        print_ok "Restored stock libfprint from backup"
     elif [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
-        echo -e "${BLUE}[*] Restoring stock libfprint from legacy backup...${NC}"
         cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
-        rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
-        echo -e "${GREEN}[✔] Restored /usr/lib64/libfprint-2.so.2.0.0 from legacy backup.${NC}"
+        print_ok "Restored stock libfprint from legacy backup"
     else
-        echo -e "${BLUE}[*] Reinstalling stock libfprint via DNF...${NC}"
-        dnf reinstall -y libfprint 2>/dev/null || true
+        run_cmd dnf reinstall -y libfprint
+        print_ok "Reinstalled stock libfprint package"
     fi
 
-    # Clean up custom fprint-deps directory, backup directory, and ld.so config
-    echo -e "${BLUE}[*] Cleaning up /usr/local/lib64/fprint-deps and /etc/ld.so.conf.d/fprint.conf...${NC}"
+    # Clean up custom dependency files and backup directory
     rm -f /etc/ld.so.conf.d/fprint.conf
     rm -rf /usr/local/lib64/fprint-deps
     rm -rf /usr/local/share/fpc1022-backup
     rm -f /usr/lib64/*stock-backup*
 
-    # Restore SELinux contexts
     if command -v restorecon >/dev/null 2>&1; then
-        restorecon -v /usr/lib64/libfprint* 2>/dev/null || true
+        run_cmd restorecon -v /usr/lib64/libfprint*
     fi
-
-    ldconfig
+    run_cmd ldconfig
+    print_ok "Cleared DNF package exclusion locks"
 }
 
 revert_debian() {
-    echo -e "${BLUE}[*] Reverting Debian/Ubuntu packages...${NC}"
-    # Unhold packages so system updates operate normally
-    apt-mark unhold libfprint-2-2 libfprint-fpc1022 2>/dev/null || true
-
-    # Reinstall stock packages without uninstalling or removing any system packages
-    echo -e "${BLUE}[*] Reinstalling stock libfprint-2-2 and fprintd via APT...${NC}"
-    apt-get install --reinstall -y libfprint-2-2 fprintd 2>/dev/null || true
-    ldconfig
+    run_cmd apt-mark unhold libfprint-2-2 libfprint-fpc1022
+    run_cmd apt-get install --reinstall -y libfprint-2-2 fprintd
+    run_cmd ldconfig
+    print_ok "Restored stock Debian/Ubuntu libfprint"
+    print_ok "Cleared APT package holds"
 }
 
 revert_arch() {
-    echo -e "${BLUE}[*] Reverting Arch Linux packages...${NC}"
     if [[ -f /etc/pacman.conf ]]; then
         sed -i -E 's/\blibfprint\b[ \t]*//g' /etc/pacman.conf
         sed -i -E '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
     fi
-    # Reinstall stock distribution packages without removing system packages
-    echo -e "${BLUE}[*] Reinstalling stock libfprint and fprintd via Pacman...${NC}"
-    pacman -S --noconfirm --needed libfprint fprintd 2>/dev/null || pacman -S --noconfirm libfprint fprintd 2>/dev/null || true
-    ldconfig
+    run_cmd pacman -S --noconfirm --needed libfprint fprintd
+    run_cmd ldconfig
+    print_ok "Restored stock Arch libfprint"
+    print_ok "Cleared Pacman package locks"
 }
 
 revert_power_button() {
-    echo -e "${BLUE}[*] Reverting power button handling configuration...${NC}"
-    
-    # 1. Remove systemd-logind config and reload
+    # 1. logind config
     if [[ -f /etc/systemd/logind.conf.d/10-power-button.conf ]]; then
-        echo -e "${BLUE}[*] Removing /etc/systemd/logind.conf.d/10-power-button.conf...${NC}"
         rm -f /etc/systemd/logind.conf.d/10-power-button.conf
         if command -v systemctl >/dev/null 2>&1; then
-            echo -e "${BLUE}[*] Reloading systemd-logind...${NC}"
-            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || systemctl restart systemd-logind 2>/dev/null || true
+            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
         fi
-        echo -e "${GREEN}[✔] Removed logind power button override and reloaded systemd-logind.${NC}"
+        print_ok "Removed logind power button policy"
     fi
 
-    # 2. Remove GNOME system-wide dconf override
+    # 2. dconf overrides
     if [[ -f /etc/dconf/db/local.d/01-power-button ]]; then
-        echo -e "${BLUE}[*] Removing /etc/dconf/db/local.d/01-power-button...${NC}"
         rm -f /etc/dconf/db/local.d/01-power-button
         rm -f /etc/dconf/db/local.d/locks/01-power-button
         if command -v dconf >/dev/null 2>&1; then
-            echo -e "${BLUE}[*] Updating dconf database...${NC}"
-            dconf update 2>/dev/null || true
-            echo -e "${GREEN}[✔] dconf database updated.${NC}"
+            run_cmd dconf update
         fi
+        print_ok "Removed desktop power button overrides"
     fi
 
-    # 3. Stop, disable and remove fpc1022-wake.service
+    # 3. fpc1022-wake systemd service
     if [[ -f /etc/systemd/system/fpc1022-wake.service ]]; then
-        echo -e "${BLUE}[*] Disabling and removing /etc/systemd/system/fpc1022-wake.service...${NC}"
         if command -v systemctl >/dev/null 2>&1; then
-            systemctl stop fpc1022-wake.service 2>/dev/null || true
-            systemctl disable fpc1022-wake.service 2>/dev/null || true
+            run_cmd systemctl stop fpc1022-wake.service
+            run_cmd systemctl disable fpc1022-wake.service
         fi
         rm -f /etc/systemd/system/fpc1022-wake.service
         if command -v systemctl >/dev/null 2>&1; then
-            systemctl daemon-reload 2>/dev/null || true
+            run_cmd systemctl daemon-reload
         fi
-        echo -e "${GREEN}[✔] Removed fpc1022-wake.service.${NC}"
+        print_ok "Disabled and removed fpc1022-wake service"
     fi
 
-    # 4. Remove udev wake rule
+    # 4. udev rule
     if [[ -f /etc/udev/rules.d/99-fpc1022-wake.rules ]]; then
-        echo -e "${BLUE}[*] Removing /etc/udev/rules.d/99-fpc1022-wake.rules...${NC}"
         rm -f /etc/udev/rules.d/99-fpc1022-wake.rules
-        echo -e "${GREEN}[✔] Removed udev wake rule.${NC}"
+        print_ok "Removed udev rule"
     fi
 
-    # 5. Remove system-sleep hook
-    if [[ -f /usr/lib/systemd/system-sleep/fpc1022-wake ]]; then
-        echo -e "${BLUE}[*] Removing /usr/lib/systemd/system-sleep/fpc1022-wake...${NC}"
-        rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
-        echo -e "${GREEN}[✔] Removed sleep resume hook.${NC}"
-    fi
+    # 5. sleep hook & binary
+    rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
+    rm -f /usr/local/bin/fpc1022-wake
+    print_ok "Removed hardware wake binary and sleep hooks"
+}
 
-    # 6. Remove fpc1022-wake binary
-    if [[ -f /usr/local/bin/fpc1022-wake ]]; then
-        echo -e "${BLUE}[*] Removing /usr/local/bin/fpc1022-wake...${NC}"
-        rm -f /usr/local/bin/fpc1022-wake
-        echo -e "${GREEN}[✔] Removed /usr/local/bin/fpc1022-wake binary.${NC}"
-    fi
-
-    # 7. Remove Polkit security policy
+revert_security() {
     if [[ -f /etc/polkit-1/rules.d/50-fprintd-auth.rules ]]; then
-        echo -e "${BLUE}[*] Removing /etc/polkit-1/rules.d/50-fprintd-auth.rules...${NC}"
         rm -f /etc/polkit-1/rules.d/50-fprintd-auth.rules
-        echo -e "${GREEN}[✔] Removed Polkit security policy.${NC}"
+        print_ok "Removed Polkit security rule"
     fi
 }
 
-cleanup_unused_dependencies() {
-    echo -e "${BLUE}[*] Checking for unused orphan dependencies to clean up...${NC}"
+cleanup_orphans() {
     case "$DISTRO_ID" in
         fedora|rhel|centos)
             if command -v dnf >/dev/null 2>&1; then
-                echo -e "${BLUE}[*] Running 'dnf autoremove' for safe dependency cleanup...${NC}"
-                dnf autoremove -y 2>/dev/null || true
+                run_cmd dnf autoremove -y
             fi
             ;;
         ubuntu|debian|linuxmint|pop)
             if command -v apt-get >/dev/null 2>&1; then
-                echo -e "${BLUE}[*] Running 'apt-get autoremove' for safe dependency cleanup...${NC}"
-                apt-get autoremove -y 2>/dev/null || true
+                run_cmd apt-get autoremove -y
             fi
             ;;
         arch|manjaro|endeavouros)
@@ -190,69 +170,70 @@ cleanup_unused_dependencies() {
                 local orphans
                 orphans="$(pacman -Qtdq 2>/dev/null || true)"
                 if [[ -n "$orphans" ]]; then
-                    echo -e "${BLUE}[*] Cleaning up orphaned packages via pacman...${NC}"
-                    pacman -Rns --noconfirm $orphans 2>/dev/null || true
-                else
-                    echo -e "${GREEN}[✔] No orphaned dependencies found.${NC}"
+                    run_cmd pacman -Rns --noconfirm $orphans
                 fi
             fi
             ;;
         *)
             if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]] && command -v dnf >/dev/null 2>&1; then
-                dnf autoremove -y 2>/dev/null || true
+                run_cmd dnf autoremove -y
             elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]] && command -v apt-get >/dev/null 2>&1; then
-                apt-get autoremove -y 2>/dev/null || true
-            elif [[ "$DISTRO_LIKE" =~ (arch) ]] && command -v pacman >/dev/null 2>&1; then
-                local orphans
-                orphans="$(pacman -Qtdq 2>/dev/null || true)"
-                if [[ -n "$orphans" ]]; then
-                    pacman -Rns --noconfirm $orphans 2>/dev/null || true
-                fi
+                run_cmd apt-get autoremove -y
             fi
             ;;
     esac
+    print_ok "Cleaned up unneeded orphan dependencies"
 }
 
-case "$DISTRO_ID" in
-    fedora|rhel|centos)
-        revert_fedora
-        ;;
-    ubuntu|debian|linuxmint|pop)
-        revert_debian
-        ;;
-    arch|manjaro|endeavouros)
-        revert_arch
-        ;;
-    *)
-        if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
+# ------------------------------------------------------------------------------
+# Main Flow
+# ------------------------------------------------------------------------------
+main() {
+    print_banner
+
+    print_step "1/4" "Restoring stock system driver..."
+    case "$DISTRO_ID" in
+        fedora|rhel|centos)
             revert_fedora
-        elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]]; then
+            ;;
+        ubuntu|debian|linuxmint|pop)
             revert_debian
-        elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
+            ;;
+        arch|manjaro|endeavouros)
             revert_arch
-        else
-            echo -e "${RED}[ERROR] Unsupported distribution: $DISTRO_ID${NC}" >&2
-            exit 1
-        fi
-        ;;
-esac
+            ;;
+        *)
+            if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
+                revert_fedora
+            elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]]; then
+                revert_debian
+            elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
+                revert_arch
+            else
+                print_warn "Distribution '$DISTRO_ID': Please reinstall stock libfprint using your package manager."
+            fi
+            ;;
+    esac
 
-# Revert power button configurations
-revert_power_button
+    print_step "2/4" "Reverting power button configuration..."
+    revert_power_button
 
-echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
-udevadm control --reload 2>/dev/null || true
-udevadm trigger 2>/dev/null || true
-systemctl restart fprintd.service 2>/dev/null || true
+    print_step "3/4" "Reverting security policies..."
+    revert_security
 
-# Safe cleanup of unused orphan dependencies at the very end
-cleanup_unused_dependencies
+    # Reload system services
+    run_cmd udevadm control --reload
+    run_cmd udevadm trigger
+    run_cmd systemctl restart fprintd.service
 
-echo ""
-echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${GREEN}${BOLD}     [✔] UNINSTALLATION COMPLETE${NC}"
-echo -e "${GREEN}${BOLD}         - Stock Libfprint Preserved & Restored (No System Packages Removed)${NC}"
-echo -e "${GREEN}${BOLD}         - Power Button Customizations Removed${NC}"
-echo -e "${GREEN}${BOLD}         - Safe Autoremove Cleanup Executed${NC}"
-echo -e "${GREEN}==============================================================================${NC}"
-echo ""
+    print_step "4/4" "Cleaning up system packages..."
+    cleanup_orphans
+
+    echo ""
+    echo -e "${GREEN}====================================================================${NC}"
+    echo -e "${GREEN}${BOLD}  ✔ Uninstallation Complete! System restored to stock settings.${NC}"
+    echo -e "${GREEN}====================================================================${NC}"
+    echo ""
+}
+
+main "$@"
