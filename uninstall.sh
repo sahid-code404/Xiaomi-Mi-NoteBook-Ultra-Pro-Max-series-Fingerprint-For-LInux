@@ -391,13 +391,36 @@ revert_security() {
 }
 
 cleanup_orphans() {
-    print_warn "Optional package cleanup requested; review the package manager's plan before confirming."
+    local answer=""
+
+    print_warn "Optional package cleanup can remove packages unrelated to this driver."
     case "$DISTRO_ID" in
         fedora|rhel|centos)
-            command -v dnf >/dev/null 2>&1 && dnf autoremove
+            if ! command -v dnf >/dev/null 2>&1; then
+                print_warn "DNF is unavailable; skipping orphan cleanup."
+                return 0
+            fi
+            # Preview only first. --assumeno overrides dnf.conf assume-yes.
+            dnf autoremove --assumeno || print_warn "DNF preview returned a non-zero status."
+            read -r -p "Run the DNF orphan cleanup shown above? [y/N]: " answer || answer=""
+            if [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]; then
+                dnf autoremove
+            else
+                print_warn "Package cleanup declined."
+            fi
             ;;
         ubuntu|debian|linuxmint|pop)
-            command -v apt-get >/dev/null 2>&1 && apt-get autoremove
+            if ! command -v apt-get >/dev/null 2>&1; then
+                print_warn "APT is unavailable; skipping orphan cleanup."
+                return 0
+            fi
+            apt-get -s autoremove || print_warn "APT preview returned a non-zero status."
+            read -r -p "Run the APT orphan cleanup shown above? [y/N]: " answer || answer=""
+            if [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]; then
+                apt-get autoremove
+            else
+                print_warn "Package cleanup declined."
+            fi
             ;;
         arch|manjaro|endeavouros)
             if command -v pacman >/dev/null 2>&1; then
@@ -406,11 +429,11 @@ cleanup_orphans() {
                 if (("${#orphans[@]}" > 0)); then
                     printf 'Orphan packages eligible for removal:\n'
                     printf '  %s\n' "${orphans[@]}"
-                    read -r -p "Remove these packages? [y/N]: " answer
+                    read -r -p "Remove these packages? [y/N]: " answer || answer=""
                     if [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]; then
                         pacman -Rns -- "${orphans[@]}"
                     else
-                        print_warn "Orphan cleanup skipped."
+                        print_warn "Package cleanup declined."
                     fi
                 else
                     print_ok "No orphan packages found."
