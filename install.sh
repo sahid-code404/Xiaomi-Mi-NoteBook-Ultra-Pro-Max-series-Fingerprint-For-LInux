@@ -602,7 +602,11 @@ configure_power_button() {
         fi
     fi
 
-    if [[ "$wake_ok" != "true" && -f "$wake_prebuilt" ]]; then
+    # The checked-in fallback binary is x86-64; never copy it onto a
+    # different architecture. On other systems, a compiler-built helper is
+    # required and the optional integration will be skipped if compilation fails.
+    if [[ "$wake_ok" != "true" && -f "$wake_prebuilt" &&
+          "$(uname -m)" == "x86_64" ]]; then
         local wake_tmp
         wake_tmp="$(mktemp "${wake_bin}.XXXXXX")" || wake_tmp=""
         if [[ -n "$wake_tmp" ]]; then
