@@ -158,6 +158,9 @@ detect_libdir() {
             if command -v dpkg-architecture >/dev/null 2>&1; then
                 multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
             fi
+            if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
+                multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+            fi
             if [[ -n "$multiarch" && -d "/usr/lib/$multiarch" ]]; then
                 printf '/usr/lib/%s\n' "$multiarch"
             else
@@ -266,9 +269,19 @@ install_fedora() {
         mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
     fi
 
+    # Refuse an untracked replacement if neither the stock library nor a
+    # previously saved original is available for rollback.
+    if [[ ! -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        print_err "No stock libfprint library or backup exists at $target_lib; refusing an unrollbackable replacement."
+        return 1
+    fi
+
     # Backup stock Fedora library once
     if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
-        cp -p "$target_lib" "$backup_lib"
+        if ! cp -p -- "$target_lib" "$backup_lib"; then
+            print_err "Could not back up the stock Fedora libfprint library."
+            return 1
+        fi
     fi
 
     # Preserve a directory that may have been created by an earlier local setup.
