@@ -191,6 +191,8 @@ revert_arch() {
 restore_managed_paths() {
     local backup_root="/usr/local/share/fpc1022-backup"
     local manifest="$backup_root/managed-paths.txt"
+    local preexisting="$backup_root/preexisting-paths.txt"
+    local created="$backup_root/created-paths.txt"
     local target backup relative
     [[ -f "$manifest" ]] || return 0
 
@@ -203,9 +205,17 @@ restore_managed_paths() {
             rm -f -- "$target"
             cp -a -- "$backup" "$target"
             print_ok "Restored previous file: $target"
-        else
+        elif grep -Fqx -- "$target" "$created" 2>/dev/null; then
             rm -f -- "$target"
-            print_ok "Removed installer-managed file: $target"
+            print_ok "Removed file created by this installer: $target"
+        elif grep -Fqx -- "$target" "$preexisting" 2>/dev/null; then
+            # The backup may have been removed or damaged. Preserve the current
+            # file rather than deleting a user's pre-existing configuration.
+            print_warn "Original backup is missing; preserved current file: $target"
+        else
+            # Compatibility fallback for manifests created by earlier versions.
+            rm -f -- "$target"
+            print_warn "Removed legacy managed file without an original-state ledger: $target"
         fi
     done < "$manifest"
 
