@@ -100,6 +100,15 @@ revert_fedora() {
     # installer versions did not record whether exclusions predated installation.
     # Inspect /etc/dnf/dnf.conf manually if a legacy exclusion remains.
 
+    # Remove only the exact global loader path written by older project releases.
+    # Preserve this file if it contains any other settings.
+    local loader_conf="/etc/ld.so.conf.d/fprint.conf"
+    if ! manifest_has_path "$loader_conf" && [[ -f "$loader_conf" ]] &&
+       [[ "$(cat "$loader_conf")" == "/usr/local/lib64/fprint-deps" ]]; then
+        rm -f -- "$loader_conf"
+        print_ok "Removed legacy global loader path"
+    fi
+
     # Restore stock libfprint (do NOT delete system packages)
     local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
     if [[ -f "$backup_lib" ]]; then
