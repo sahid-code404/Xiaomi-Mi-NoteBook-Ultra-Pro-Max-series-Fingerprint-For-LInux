@@ -15,6 +15,9 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP_ROOT="/usr/local/share/fpc1022-backup"
+
 print_banner() {
     cat << "EOF"
 ====================================================================
@@ -29,8 +32,36 @@ print_warn() { echo -e "    ${YELLOW}!${NC} $*"; }
 print_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 run_cmd() {
-    "$@" >/dev/null 2>&1 || true
+    local status=0
+    "$@" >/dev/null 2>&1 || status=$?
+    if (( status != 0 )); then
+        print_warn "Best-effort command failed (exit $status): $*"
+    fi
+    return 0
 }
+
+CLEANUP_ORPHANS=false
+case "${1:-}" in
+    "")
+        ;;
+    --cleanup-orphans)
+        CLEANUP_ORPHANS=true
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage: sudo ./uninstall.sh [--cleanup-orphans]
+
+Restores native packages and files managed by this installer.
+Orphan cleanup is opt-in because it may remove packages unrelated to this driver.
+EOF
+        exit 0
+        ;;
+    *)
+        print_err "Unknown option: $1"
+        echo "Usage: sudo ./uninstall.sh [--cleanup-orphans]" >&2
+        exit 2
+        ;;
+esac
 
 if [[ "$(id -u)" -ne 0 ]]; then
     print_err "This uninstaller must be run as root. Please run: sudo $0"
@@ -46,6 +77,77 @@ fi
 DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
 
+manifest_has_path() {
+    local target="$1"
+    local manifest="$BACKUP_ROOT/managed-paths.txt"
+    [[ -f "$manifest" ]] && grep -Fqx -- "$target" "$manifest"
+}
+
+is_managed_or_matching() {
+    local target="$1" template="${2:-}"
+    local backup="$BACKUP_ROOT/config-backups/${target#/}"
+    if manifest_has_path "$target"; then
+        if grep -Fqx -- "$target" "$BACKUP_ROOT/preexisting-paths.txt" 2>/dev/null &&
+           [[ ! -e "$backup" && ! -L "$backup" ]]; then
+            return 1
+        fi
+        return 0
+    fi
+    [[ -n "$template" && -f "$SCRIPT_DIR/$template" && -f "$target" ]] &&
+        cmp -s -- "$SCRIPT_DIR/$template" "$target"
+}
+
+restore_file_atomically() {
+    local source="$1" target="$2" temp
+    [[ -f "$source" ]] || { print_err "Backup missing: $source"; return 1; }
+    temp="$(mktemp "${target}.restore.XXXXXX")" || return 1
+    if ! cp -p -- "$source" "$temp" || ! mv -f -- "$temp" "$target"; then
+        rm -f -- "$temp"
+        print_err "Could not restore $target; backup remains at $source."
+        return 1
+    fi
+}
+
+restore_managed_paths() {
+    local manifest="$BACKUP_ROOT/managed-paths.txt"
+    local preexisting="$BACKUP_ROOT/preexisting-paths.txt"
+    local created="$BACKUP_ROOT/created-paths.txt"
+    local target backup relative
+    [[ -f "$manifest" ]] || return 0
+    while IFS= read -r target; do
+        [[ -n "$target" && "$target" == /* ]] || continue
+        relative="${target#/}"
+        backup="$BACKUP_ROOT/config-backups/$relative"
+        if [[ -e "$backup" || -L "$backup" ]]; then
+            mkdir -p "$(dirname "$target")"
+            rm -f -- "$target"
+            cp -a -- "$backup" "$target"
+            print_ok "Restored previous file: $target"
+        elif grep -Fqx -- "$target" "$created" 2>/dev/null; then
+            rm -f -- "$target"
+            print_ok "Removed file created by this installer: $target"
+        elif grep -Fqx -- "$target" "$preexisting" 2>/dev/null; then
+            print_warn "Original backup missing; preserved current file: $target"
+        else
+            rm -f -- "$target"
+            print_warn "Removed legacy managed file: $target"
+        fi
+    done < "$manifest"
+    if command -v dconf >/dev/null 2>&1 && grep -Eq '^/etc/dconf/' "$manifest"; then
+        run_cmd dconf update
+    fi
+}
+
+restore_wake_service_state() {
+    local state="$BACKUP_ROOT/fpc1022-wake-service.state"
+    [[ -f "$state" ]] || return 0
+    if command -v systemctl >/dev/null 2>&1; then
+        if grep -qx 'enabled' "$state"; then run_cmd systemctl enable fpc1022-wake.service; else run_cmd systemctl disable fpc1022-wake.service; fi
+        if grep -qx 'active' "$state"; then run_cmd systemctl start fpc1022-wake.service; else run_cmd systemctl stop fpc1022-wake.service; fi
+    fi
+}
+
+
 revert_fedora() {
     # Current releases are installed as an RPM. Let DNF perform the complete
     # replacement transaction instead of copying libraries behind its back.
@@ -54,11 +156,18 @@ revert_fedora() {
     fi
     dnf install -y libfprint fprintd fprintd-pam
 
-    # Clean up files produced only by pre-RPM releases.
-    rm -f /etc/ld.so.conf.d/fprint.conf
-    rm -rf /usr/local/lib64/fprint-deps
-    rm -rf /usr/local/share/fpc1022-backup
-    rm -f /usr/lib64/*stock-backup*
+    # Remove only the exact global loader path used by old project versions.
+    # Preserve user-managed loader configuration and backups unless recognized.
+    local loader_conf="/etc/ld.so.conf.d/fprint.conf"
+    local legacy_backup="$BACKUP_ROOT/libfprint-2.so.2.0.0.stock-backup"
+    if [[ -f "$loader_conf" ]] &&
+       [[ "$(cat "$loader_conf")" == "/usr/local/lib64/fprint-deps" ]] &&
+       { [[ -f "$legacy_backup" ]] || [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; }; then
+        rm -f -- "$loader_conf"
+        rm -rf -- /usr/local/lib64/fprint-deps
+    elif [[ -e "$loader_conf" ]]; then
+        print_warn "Preserved unrecognized loader configuration: $loader_conf"
+    fi
 
     if command -v restorecon >/dev/null 2>&1; then
         run_cmd restorecon -v /usr/lib64/libfprint*
@@ -86,57 +195,90 @@ revert_arch() {
 }
 
 revert_power_button() {
-    # 1. logind config
-    if [[ -f /etc/systemd/logind.conf.d/10-power-button.conf ]]; then
-        rm -f /etc/systemd/logind.conf.d/10-power-button.conf
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
-        fi
-        print_ok "Removed logind power button policy"
+    local wake_service="/etc/systemd/system/fpc1022-wake.service"
+    # Stop only a service that this installer managed (or whose contents
+    # exactly match the known project unit). File restoration happens later.
+    if [[ -f "$wake_service" ]] && is_managed_or_matching "$wake_service" "configs/fpc1022-wake.service"; then
+        run_cmd systemctl stop fpc1022-wake.service
+        run_cmd systemctl disable fpc1022-wake.service
     fi
-
-    # 2. dconf overrides
-    if [[ -f /etc/dconf/db/local.d/01-power-button ]]; then
-        rm -f /etc/dconf/db/local.d/01-power-button
-        rm -f /etc/dconf/db/local.d/locks/01-power-button
-        if command -v dconf >/dev/null 2>&1; then
-            run_cmd dconf update
-        fi
-        print_ok "Removed desktop power button overrides"
-    fi
-
-    # 3. fpc1022-wake systemd service
-    if [[ -f /etc/systemd/system/fpc1022-wake.service ]]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            run_cmd systemctl stop fpc1022-wake.service
-            run_cmd systemctl disable fpc1022-wake.service
-        fi
-        rm -f /etc/systemd/system/fpc1022-wake.service
-        if command -v systemctl >/dev/null 2>&1; then
-            run_cmd systemctl daemon-reload
-        fi
-        print_ok "Disabled and removed fpc1022-wake service"
-    fi
-
-    # 4. udev rule
-    if [[ -f /etc/udev/rules.d/99-fpc1022-wake.rules ]]; then
-        rm -f /etc/udev/rules.d/99-fpc1022-wake.rules
-        print_ok "Removed udev rule"
-    fi
-
-    # 5. sleep hook, binaries, and non-sensitive diagnostic baseline
-    rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
-    rm -f /usr/local/bin/fpc1022-wake
-    rm -f /usr/local/bin/fpc1022-doctor
-    rm -rf /var/lib/fpc1022-driver
-    print_ok "Removed hardware wake binary, diagnostic, and sleep hooks"
 }
 
 revert_security() {
-    if [[ -f /etc/polkit-1/rules.d/50-fprintd-auth.rules ]]; then
-        rm -f /etc/polkit-1/rules.d/50-fprintd-auth.rules
-        print_ok "Removed Polkit security rule"
+    local rule="/etc/polkit-1/rules.d/50-fprintd-auth.rules"
+    if [[ -f "$rule" ]] && ! is_managed_or_matching "$rule" "configs/50-fprintd-auth.rules"; then
+        print_warn "Preserved unrecognized Polkit rule: $rule"
     fi
+    # Managed rules are restored or removed by restore_managed_paths().
+}
+
+revert_generic_source() {
+    local lib_dir="/usr/lib"
+    case "$DISTRO_ID" in
+        debian|ubuntu|linuxmint|pop)
+            local multiarch=""
+            if command -v dpkg-architecture >/dev/null 2>&1; then
+                multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
+                multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]]; then
+                local candidate
+                for candidate in /usr/lib/*-linux-gnu; do
+                    [[ -d "$candidate" ]] || continue
+                    if [[ -f "$candidate/libfprint-2.so.2.0.0" || -e "$candidate/libfprint-2.so.2" ]]; then
+                        multiarch="${candidate#/usr/lib/}"
+                        break
+                    fi
+                done
+            fi
+            [[ -z "$multiarch" || ! -d "/usr/lib/$multiarch" ]] || lib_dir="/usr/lib/$multiarch"
+            ;;
+        *)
+            [[ ! -d /usr/lib64 ]] || lib_dir="/usr/lib64"
+            ;;
+    esac
+    local target="$lib_dir/libfprint-2.so.2.0.0"
+    local backup="$BACKUP_ROOT/libfprint-2.so.2.0.0.stock-backup"
+    if [[ -f "$backup" ]]; then
+        restore_file_atomically "$backup" "$target"
+        ln -sf libfprint-2.so.2.0.0 "$lib_dir/libfprint-2.so.2"
+        run_cmd ldconfig
+        print_ok "Restored original libfprint library"
+    else
+        print_warn "No source-build backup was found; reinstall the distribution's libfprint package if needed."
+    fi
+}
+
+cleanup_orphans() {
+    local answer=""
+    print_warn "Optional orphan cleanup may remove packages unrelated to this driver."
+    case "$DISTRO_ID" in
+        fedora|rhel|centos)
+            dnf autoremove --assumeno || print_warn "DNF preview returned non-zero."
+            read -r -p "Run the DNF orphan cleanup shown above? [y/N]: " answer || answer=""
+            [[ ! "$answer" =~ ^[yY]([eE][sS])?$ ]] || dnf autoremove
+            ;;
+        ubuntu|debian|linuxmint|pop)
+            apt-get -s autoremove || print_warn "APT preview returned non-zero."
+            read -r -p "Run the APT orphan cleanup shown above? [y/N]: " answer || answer=""
+            [[ ! "$answer" =~ ^[yY]([eE][sS])?$ ]] || apt-get autoremove
+            ;;
+        arch|manjaro|endeavouros)
+            local -a orphans=()
+            mapfile -t orphans < <(pacman -Qtdq 2>/dev/null || true)
+            if (("${#orphans[@]}" > 0)); then
+                printf 'Orphan packages eligible for removal:\n'
+                printf '  %s\n' "${orphans[@]}"
+                read -r -p "Remove these packages? [y/N]: " answer || answer=""
+                [[ ! "$answer" =~ ^[yY]([eE][sS])?$ ]] || pacman -Rns -- "${orphans[@]}"
+            else
+                print_ok "No orphan packages found."
+            fi
+            ;;
+        *) print_warn "Run your distribution's orphan cleanup manually if needed." ;;
+    esac
 }
 
 # ------------------------------------------------------------------------------
@@ -156,6 +298,9 @@ main() {
         arch|manjaro|endeavouros)
             revert_arch
             ;;
+        opensuse*|sles)
+            revert_generic_source
+            ;;
         *)
             if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
                 revert_fedora
@@ -164,7 +309,7 @@ main() {
             elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
                 revert_arch
             else
-                print_warn "Distribution '$DISTRO_ID': Please reinstall stock libfprint using your package manager."
+                revert_generic_source
             fi
             ;;
     esac
@@ -172,16 +317,33 @@ main() {
     print_step "2/4" "Reverting power button configuration..."
     revert_power_button
 
-    print_step "3/4" "Reverting security policies..."
+    print_step "3/5" "Reverting security policies..."
     revert_security
 
-    # Reload system services
-    run_cmd udevadm control --reload
-    run_cmd udevadm trigger
-    run_cmd systemctl restart fprintd.service
+    print_step "4/5" "Restoring configuration files and service state..."
+    restore_managed_paths
+    if command -v systemctl >/dev/null 2>&1; then
+        run_cmd systemctl daemon-reload
+        run_cmd systemctl reload systemd-logind
+        restore_wake_service_state
+    fi
+    if command -v udevadm >/dev/null 2>&1; then
+        run_cmd udevadm control --reload
+        run_cmd udevadm trigger
+    fi
+    run_cmd ldconfig
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fprintd.service; then
+        run_cmd systemctl restart fprintd.service
+    fi
+    print_warn "Review PAM/authselect manually if an older installer enabled fingerprint login."
 
-    print_step "4/4" "Leaving unrelated packages untouched..."
-    print_ok "No automatic autoremove was run; review removable packages yourself."
+    print_step "5/5" "Optional orphan-package cleanup..."
+    if [[ "$CLEANUP_ORPHANS" == "true" ]]; then
+        cleanup_orphans
+    else
+        print_ok "Skipped orphan-package cleanup (safe default)."
+    fi
+    rm -rf -- "$BACKUP_ROOT"
 
     echo ""
     echo -e "${GREEN}====================================================================${NC}"
