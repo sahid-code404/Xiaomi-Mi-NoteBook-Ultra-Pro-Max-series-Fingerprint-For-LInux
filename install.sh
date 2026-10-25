@@ -336,10 +336,15 @@ install_from_source() {
             ;;
     esac
 
-    # Save the original library once, before a source build can replace it.
+    # This path replaces a distribution library, so require a known stock
+    # target and keep a byte-for-byte backup before the build starts.
     local backup_dir="$BACKUP_ROOT"
     local target_lib="${lib_dir}/libfprint-2.so.2.0.0"
-    if [[ -f "$target_lib" && ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
+    if [[ ! -f "$target_lib" ]]; then
+        print_err "No existing libfprint library found at $target_lib. Install the distribution's libfprint package first; refusing an untracked replacement."
+        exit 1
+    fi
+    if [[ ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
         mkdir -p "$backup_dir"
         cp -p "$target_lib" "$backup_dir/libfprint-2.so.2.0.0.stock-backup"
     fi
@@ -353,8 +358,19 @@ install_from_source() {
         meson setup build --prefix=/usr --libdir="${lib_dir#/usr/}" -Ddrivers=all -Ddoc=false \
             -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
         ninja -C build
-        ninja -C build install
+
+        # Stage the install and deploy only the runtime library. Installing the
+        # entire libfprint development tree over package-owned files would make
+        # rollback incomplete and risk trampling headers/pkg-config metadata.
+        DESTDIR="$build_tmp/stage" ninja -C build install
     )
+    local staged_lib="$build_tmp/stage$target_lib"
+    if [[ ! -f "$staged_lib" ]]; then
+        rm -rf "$build_tmp"
+        print_err "Staged libfprint library was not found at $staged_lib"
+        exit 1
+    fi
+    cp -p "$staged_lib" "$target_lib"
     rm -rf "$build_tmp"
 
     if command -v chcon >/dev/null 2>&1; then
