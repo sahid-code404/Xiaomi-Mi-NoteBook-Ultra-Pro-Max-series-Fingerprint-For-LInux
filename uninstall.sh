@@ -233,6 +233,9 @@ revert_generic_source() {
         if command -v dpkg-architecture >/dev/null 2>&1; then
             multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
         fi
+        if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
+            multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+        fi
         [[ -z "$multiarch" || ! -d "/usr/lib/$multiarch" ]] || lib_dir="/usr/lib/$multiarch"
     elif [[ -d /usr/lib64 ]]; then
         lib_dir="/usr/lib64"
