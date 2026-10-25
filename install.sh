@@ -17,10 +17,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_USER="${SUDO_USER:-$USER}"
-if [[ "$TARGET_USER" == "root" ]]; then
-    TARGET_USER="$(logname 2>/dev/null || id -nu 1000 2>/dev/null || echo "root")"
-fi
+BACKUP_ROOT="/usr/local/share/fpc1022-backup"
 
 BUILD_MODE=false
 ASSUME_YES=false
@@ -92,6 +89,49 @@ run_cmd() {
     fi
 }
 
+# Preserve any pre-existing file before this installer manages it. Backups
+# are kept outside package-owned paths so uninstall can restore prior state.
+backup_managed_file() {
+    local target="$1"
+    local backup="$BACKUP_ROOT/config-backups/${target#/}"
+    local manifest="$BACKUP_ROOT/managed-paths.txt"
+
+    mkdir -p "$BACKUP_ROOT"
+    if [[ -e "$target" && ! -e "$backup" ]]; then
+        mkdir -p "$(dirname "$backup")"
+        cp -a -- "$target" "$backup"
+    fi
+    if ! grep -Fqx -- "$target" "$manifest" 2>/dev/null; then
+        printf '%s\n' "$target" >> "$manifest"
+    fi
+}
+
+detect_libdir() {
+    local family="$1"
+    local multiarch=""
+    case "$family" in
+        debian)
+            if command -v dpkg-architecture >/dev/null 2>&1; then
+                multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+            fi
+            if [[ -n "$multiarch" && -d "/usr/lib/$multiarch" ]]; then
+                printf '/usr/lib/%s\n' "$multiarch"
+            else
+                printf '/usr/lib\n'
+            fi
+            ;;
+        fedora|suse)
+            if [[ -d /usr/lib64 ]]; then printf '/usr/lib64\n'; else printf '/usr/lib\n'; fi
+            ;;
+        arch)
+            printf '/usr/lib\n'
+            ;;
+        *)
+            if [[ -d /usr/lib64 ]]; then printf '/usr/lib64\n'; else printf '/usr/lib\n'; fi
+            ;;
+    esac
+}
+
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         print_err "This installer must be run as root. Please run: sudo $0"
@@ -133,7 +173,7 @@ install_fedora() {
     local fedora_pkg="$SCRIPT_DIR/packages/fedora"
     local deps_dir="/usr/local/lib64/fprint-deps"
     local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
-    local backup_dir="/usr/local/share/fpc1022-backup"
+    local backup_dir="$BACKUP_ROOT"
     local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
 
     # Install fprintd daemon if missing
@@ -148,8 +188,8 @@ install_fedora() {
 
     mkdir -p "$backup_dir"
 
-    # Clean up legacy backup in /usr/lib64 to prevent ldconfig symlink hijacking
-    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
+    # Migrate a backup left by older releases without deleting the only copy.
+    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" && ! -f "$backup_lib" ]]; then
         mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
     fi
 
@@ -157,9 +197,6 @@ install_fedora() {
     if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
         cp -p "$target_lib" "$backup_lib"
     fi
-
-    # Clean up any leftover stock backup file in /usr/lib64
-    rm -f /usr/lib64/*stock-backup*
 
     # Deploy bundled runtime dependencies
     mkdir -p "$deps_dir"
@@ -177,6 +214,7 @@ install_fedora() {
         [[ -f /usr/lib64/libcrypto.so.3 ]] && ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
         [[ -f /usr/lib64/libssl.so.3 ]] && ln -sf /usr/lib64/libssl.so.3 libssl.so
     )
+    backup_managed_file /etc/ld.so.conf.d/fprint.conf
     echo "$deps_dir" > /etc/ld.so.conf.d/fprint.conf
 
     # Deploy patched driver and enforce symlink
@@ -195,24 +233,8 @@ install_fedora() {
 
     run_cmd ldconfig
 
-    # Shield libfprint from DNF upgrades
-    local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]]; then
-        if grep -E -q "^[ \t]*excludepkgs[ \t]*=" "$dnf_conf"; then
-            if ! grep -q "libfprint\*" "$dnf_conf"; then
-                sed -i -E 's/^[ \t]*excludepkgs[ \t]*=(.*)/excludepkgs=\1 libfprint*/' "$dnf_conf"
-            fi
-        else
-            if grep -q "^\[main\]" "$dnf_conf"; then
-                sed -i '/^\[main\]/a excludepkgs=libfprint*' "$dnf_conf"
-            else
-                echo -e "\n[main]\nexcludepkgs=libfprint*" >> "$dnf_conf"
-            fi
-        fi
-    fi
-
     print_ok "Installed FPC1022 driver and runtime libraries"
-    print_ok "Protected driver from DNF system upgrades"
+    print_warn "Package updates are not blocked; an upstream libfprint update may replace this build."
 }
 
 # ------------------------------------------------------------------------------
@@ -233,16 +255,8 @@ install_debian() {
         install_from_source "debian"
     fi
 
-    # Pin in apt
-    run_cmd apt-mark hold libfprint-2-2 libfprint-fpc1022
-
-    # Enable PAM auth
-    if command -v pam-auth-update >/dev/null 2>&1; then
-        run_cmd pam-auth-update --enable fingerprint
-    fi
-
     print_ok "Installed FPC1022 driver"
-    print_ok "Protected driver from APT package updates"
+    print_warn "Fingerprint PAM remains opt-in; test enrollment and verification before enabling login authentication."
 }
 
 # ------------------------------------------------------------------------------
@@ -263,23 +277,8 @@ install_arch() {
         install_from_source "arch"
     fi
 
-    # Pin in pacman.conf
-    if [[ -f /etc/pacman.conf ]]; then
-        if grep -E -q "^[ \t]*IgnorePkg" /etc/pacman.conf; then
-            if ! grep -q "\blibfprint\b" /etc/pacman.conf; then
-                sed -i -E 's/^[ \t]*IgnorePkg[ \t]*=[ \t]*(.*)/IgnorePkg = \1 libfprint/' /etc/pacman.conf
-            fi
-        else
-            if grep -q "^\[options\]" /etc/pacman.conf; then
-                sed -i '/^\[options\]/a IgnorePkg = libfprint' /etc/pacman.conf
-            else
-                echo -e "\n[options]\nIgnorePkg = libfprint" >> /etc/pacman.conf
-            fi
-        fi
-    fi
-
     print_ok "Installed FPC1022 driver"
-    print_ok "Protected driver from Pacman system updates"
+    print_warn "Package updates are not blocked; an upstream libfprint update may replace this build."
 }
 
 # ------------------------------------------------------------------------------
@@ -288,8 +287,8 @@ install_arch() {
 install_from_source() {
     local family="$1"
     local src_dir="$SCRIPT_DIR/src/libfprint"
-    local lib_dir="/usr/lib"
-    [[ -d /usr/lib64 ]] && lib_dir="/usr/lib64"
+    local lib_dir
+    lib_dir="$(detect_libdir "$family")"
 
     if [[ ! -d "$src_dir" ]]; then
         print_err "Source tree not found at $src_dir"
@@ -329,14 +328,13 @@ install_from_source() {
             ;;
     esac
 
-    # Isolate backup if stock lib exists
-    local backup_dir="/usr/local/share/fpc1022-backup"
+    # Save the original library once, before a source build can replace it.
+    local backup_dir="$BACKUP_ROOT"
     local target_lib="${lib_dir}/libfprint-2.so.2.0.0"
     if [[ -f "$target_lib" && ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
         mkdir -p "$backup_dir"
         cp -p "$target_lib" "$backup_dir/libfprint-2.so.2.0.0.stock-backup"
     fi
-    rm -f "${lib_dir}/"*stock-backup*
 
     local build_tmp
     build_tmp="$(mktemp -d /tmp/fpc1022_build.XXXXXX)"
@@ -344,7 +342,7 @@ install_from_source() {
 
     (
         cd "$build_tmp/src"
-        meson setup build --prefix=/usr --libdir="$lib_dir" -Ddrivers=all -Ddoc=false \
+        meson setup build --prefix=/usr --libdir="${lib_dir#/usr/}" -Ddrivers=all -Ddoc=false \
             -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
         ninja -C build
         ninja -C build install
@@ -370,6 +368,7 @@ configure_power_button() {
     local logind_dir="/etc/systemd/logind.conf.d"
     local power_conf="$SCRIPT_DIR/configs/10-power-button.conf"
     if [[ -f "$power_conf" ]]; then
+        backup_managed_file "$logind_dir/10-power-button.conf"
         mkdir -p "$logind_dir"
         cp -p "$power_conf" "$logind_dir/10-power-button.conf"
         if command -v systemctl >/dev/null 2>&1; then
@@ -378,15 +377,14 @@ configure_power_button() {
         print_ok "Configured instant power button response (logind)"
     fi
 
-    # 2. Add user to input group if group exists
-    if getent group input >/dev/null 2>&1 && [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]]; then
-        run_cmd usermod -a -G input "$TARGET_USER"
-        print_ok "Added user '${TARGET_USER}' to 'input' group"
-    fi
+    # Do not add users to the broad "input" group: it can expose keyboard
+    # and other input events. Access is controlled with a scoped USB udev rule.
 
     # 3. Clean up legacy dconf locks so desktop power action remains user-configurable
     local dconf_dir="/etc/dconf/db/local.d"
     if [[ -f "$dconf_dir/01-power-button" || -f "$dconf_dir/locks/01-power-button" ]]; then
+        [[ ! -f "$dconf_dir/01-power-button" ]] || backup_managed_file "$dconf_dir/01-power-button"
+        [[ ! -f "$dconf_dir/locks/01-power-button" ]] || backup_managed_file "$dconf_dir/locks/01-power-button"
         rm -f "$dconf_dir/01-power-button" "$dconf_dir/locks/01-power-button"
         if command -v dconf >/dev/null 2>&1; then
             run_cmd dconf update
@@ -399,6 +397,9 @@ configure_power_button() {
     local wake_c="$SCRIPT_DIR/tools/fpc1022-wake.c"
     local wake_prebuilt="$SCRIPT_DIR/tools/fpc1022-wake"
     local wake_ok=false
+
+    # Preserve a previously installed helper before replacing it.
+    backup_managed_file "$wake_bin"
 
     if command -v gcc >/dev/null 2>&1 && [[ -f "$wake_c" ]]; then
         local libusb_flags
@@ -418,12 +419,14 @@ configure_power_button() {
     if [[ "$wake_ok" == "true" ]]; then
         # udev rule
         if [[ -f "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" ]]; then
+            backup_managed_file /etc/udev/rules.d/99-fpc1022-wake.rules
             cp -p "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" /etc/udev/rules.d/99-fpc1022-wake.rules
             chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
         fi
 
         # systemd boot service
         if [[ -f "$SCRIPT_DIR/configs/fpc1022-wake.service" ]]; then
+            backup_managed_file /etc/systemd/system/fpc1022-wake.service
             cp -p "$SCRIPT_DIR/configs/fpc1022-wake.service" /etc/systemd/system/fpc1022-wake.service
             chmod 644 /etc/systemd/system/fpc1022-wake.service
             if command -v systemctl >/dev/null 2>&1; then
@@ -434,6 +437,7 @@ configure_power_button() {
 
         # resume sleep hook
         if [[ -d /usr/lib/systemd/system-sleep && -f "$SCRIPT_DIR/configs/fpc1022-sleep-wake" ]]; then
+            backup_managed_file /usr/lib/systemd/system-sleep/fpc1022-wake
             cp -p "$SCRIPT_DIR/configs/fpc1022-sleep-wake" /usr/lib/systemd/system-sleep/fpc1022-wake
             chmod 755 /usr/lib/systemd/system-sleep/fpc1022-wake
         fi
@@ -451,6 +455,7 @@ configure_security() {
     local polkit_rule="$SCRIPT_DIR/configs/50-fprintd-auth.rules"
     local polkit_dir="/etc/polkit-1/rules.d"
     if [[ -d "$polkit_dir" && -f "$polkit_rule" ]]; then
+        backup_managed_file "$polkit_dir/50-fprintd-auth.rules"
         cp -p "$polkit_rule" "$polkit_dir/50-fprintd-auth.rules"
         chmod 644 "$polkit_dir/50-fprintd-auth.rules"
         print_ok "Enabled PolicyKit rule (password required to delete/enroll prints)"
@@ -466,17 +471,8 @@ finalize_installation() {
     run_cmd systemctl restart fprintd.service
     sleep 1
 
-    # Fedora authselect fingerprint enable
-    if command -v authselect >/dev/null 2>&1; then
-        if authselect current >/dev/null 2>&1; then
-            if ! authselect current | grep -q "with-fingerprint"; then
-                run_cmd authselect enable-feature with-fingerprint
-                run_cmd authselect apply-changes
-                print_ok "Enabled fingerprint PAM feature in authselect"
-            fi
-        fi
-    fi
     print_ok "Reloaded system services and restarted fprintd"
+    print_warn "Login authentication was not changed. Enable fingerprint PAM only after repeated verification succeeds."
 }
 
 # ------------------------------------------------------------------------------
