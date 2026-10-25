@@ -133,7 +133,19 @@ backup_managed_file() {
     # Classify each path only once so a repeat install never mistakes a file
     # created by this project for a user's original configuration.
     if grep -Fqx -- "$target" "$manifest" 2>/dev/null; then
+        if grep -Fqx -- "$target" "$preexisting" 2>/dev/null &&
+           [[ ! -e "$backup" && ! -L "$backup" ]]; then
+            print_err "The original backup for $target is missing; refusing to replace a pre-existing file."
+            return 1
+        fi
         return 0
+    fi
+
+    # A backup without a manifest entry can be left by an interrupted older
+    # attempt. Do not overwrite that potentially valuable recovery copy.
+    if [[ -e "$backup" || -L "$backup" ]]; then
+        print_err "Found an unmanaged backup for $target at $backup; inspect recovery state before reinstalling."
+        return 1
     fi
 
     if [[ -e "$target" || -L "$target" ]]; then
