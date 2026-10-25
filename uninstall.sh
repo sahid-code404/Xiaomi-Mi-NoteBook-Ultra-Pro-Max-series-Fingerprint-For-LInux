@@ -360,7 +360,7 @@ cleanup_orphans() {
 main() {
     print_banner
 
-    print_step "1/4" "Restoring stock system driver..."
+    print_step "1/5" "Restoring stock system driver..."
     case "$DISTRO_ID" in
         fedora|rhel|centos)
             revert_fedora
