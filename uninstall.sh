@@ -32,6 +32,29 @@ run_cmd() {
     "$@" >/dev/null 2>&1 || true
 }
 
+CLEANUP_ORPHANS=false
+case "${1:-}" in
+    "")
+        ;;
+    --cleanup-orphans)
+        CLEANUP_ORPHANS=true
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage: sudo ./uninstall.sh [--cleanup-orphans]
+
+Restores the distribution driver and removes files managed by this project.
+Optional orphan-package cleanup is opt-in because it may remove unrelated packages.
+EOF
+        exit 0
+        ;;
+    *)
+        print_err "Unknown option: $1"
+        echo "Usage: sudo ./uninstall.sh [--cleanup-orphans]" >&2
+        exit 2
+        ;;
+esac
+
 if [[ "$(id -u)" -ne 0 ]]; then
     print_err "This uninstaller must be run as root. Please run: sudo $0"
     exit 1
@@ -69,11 +92,10 @@ revert_fedora() {
         print_ok "Reinstalled stock libfprint package"
     fi
 
-    # Clean up custom dependency files and backup directory
-    rm -f /etc/ld.so.conf.d/fprint.conf
+    # Remove bundled runtime dependencies. Keep the backup root until the
+    # common managed-file restoration pass has completed.
     rm -rf /usr/local/lib64/fprint-deps
-    rm -rf /usr/local/share/fpc1022-backup
-    rm -f /usr/lib64/*stock-backup*
+    rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
 
     if command -v restorecon >/dev/null 2>&1; then
         run_cmd restorecon -v /usr/lib64/libfprint*
@@ -99,6 +121,58 @@ revert_arch() {
     run_cmd ldconfig
     print_ok "Restored stock Arch libfprint"
     print_ok "Cleared Pacman package locks"
+}
+
+restore_managed_paths() {
+    local backup_root="/usr/local/share/fpc1022-backup"
+    local manifest="$backup_root/managed-paths.txt"
+    local target backup relative
+    [[ -f "$manifest" ]] || return 0
+
+    while IFS= read -r target; do
+        [[ -n "$target" && "$target" == /* ]] || continue
+        relative="${target#/}"
+        backup="$backup_root/config-backups/$relative"
+        if [[ -e "$backup" || -L "$backup" ]]; then
+            mkdir -p "$(dirname "$target")"
+            rm -f -- "$target"
+            cp -a -- "$backup" "$target"
+            print_ok "Restored previous file: $target"
+        else
+            rm -f -- "$target"
+            print_ok "Removed installer-managed file: $target"
+        fi
+    done < "$manifest"
+
+    if command -v dconf >/dev/null 2>&1 &&
+       grep -Eq '^/etc/dconf/' "$manifest"; then
+        run_cmd dconf update
+    fi
+}
+
+revert_generic_source() {
+    local lib_dir="/usr/lib"
+    if [[ "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" ||
+          "$DISTRO_ID" == "linuxmint" || "$DISTRO_ID" == "pop" ]]; then
+        local multiarch=""
+        if command -v dpkg-architecture >/dev/null 2>&1; then
+            multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+        fi
+        [[ -z "$multiarch" || ! -d "/usr/lib/$multiarch" ]] || lib_dir="/usr/lib/$multiarch"
+    elif [[ -d /usr/lib64 ]]; then
+        lib_dir="/usr/lib64"
+    fi
+
+    local backup="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
+    local target="$lib_dir/libfprint-2.so.2.0.0"
+    if [[ -f "$backup" ]]; then
+        cp -p -- "$backup" "$target"
+        ln -sf libfprint-2.so.2.0.0 "$lib_dir/libfprint-2.so.2"
+        print_ok "Restored saved libfprint library at $target"
+    else
+        print_warn "No original libfprint backup was found for $lib_dir. Reinstall the distribution's libfprint package manually."
+    fi
+    run_cmd ldconfig
 }
 
 revert_power_button() {
@@ -154,35 +228,36 @@ revert_security() {
 }
 
 cleanup_orphans() {
+    print_warn "Optional package cleanup requested; review the package manager's plan before confirming."
     case "$DISTRO_ID" in
         fedora|rhel|centos)
-            if command -v dnf >/dev/null 2>&1; then
-                run_cmd dnf autoremove -y
-            fi
+            command -v dnf >/dev/null 2>&1 && dnf autoremove
             ;;
         ubuntu|debian|linuxmint|pop)
-            if command -v apt-get >/dev/null 2>&1; then
-                run_cmd apt-get autoremove -y
-            fi
+            command -v apt-get >/dev/null 2>&1 && apt-get autoremove
             ;;
         arch|manjaro|endeavouros)
             if command -v pacman >/dev/null 2>&1; then
-                local orphans
-                orphans="$(pacman -Qtdq 2>/dev/null || true)"
-                if [[ -n "$orphans" ]]; then
-                    run_cmd pacman -Rns --noconfirm $orphans
+                local -a orphans=()
+                mapfile -t orphans < <(pacman -Qtdq 2>/dev/null || true)
+                if (("${#orphans[@]}" > 0)); then
+                    printf 'Orphan packages eligible for removal:\n'
+                    printf '  %s\n' "${orphans[@]}"
+                    read -r -p "Remove these packages? [y/N]: " answer
+                    if [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]; then
+                        pacman -Rns -- "${orphans[@]}"
+                    else
+                        print_warn "Orphan cleanup skipped."
+                    fi
+                else
+                    print_ok "No orphan packages found."
                 fi
             fi
             ;;
         *)
-            if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]] && command -v dnf >/dev/null 2>&1; then
-                run_cmd dnf autoremove -y
-            elif [[ "$DISTRO_LIKE" =~ (ubuntu|debian) ]] && command -v apt-get >/dev/null 2>&1; then
-                run_cmd apt-get autoremove -y
-            fi
+            print_warn "Run your distribution's orphan cleanup manually if required."
             ;;
     esac
-    print_ok "Cleaned up unneeded orphan dependencies"
 }
 
 # ------------------------------------------------------------------------------
@@ -215,23 +290,43 @@ main() {
             ;;
     esac
 
-    print_step "2/4" "Reverting power button configuration..."
+    print_step "2/5" "Reverting power button configuration..."
     revert_power_button
 
-    print_step "3/4" "Reverting security policies..."
+    print_step "3/5" "Reverting security policies..."
     revert_security
+
+    print_step "4/5" "Restoring previous configuration files..."
+    restore_managed_paths
+    if command -v systemctl >/dev/null 2>&1; then
+        run_cmd systemctl daemon-reload
+        run_cmd systemctl reload systemd-logind
+    fi
+    run_cmd udevadm control --reload
+    run_cmd udevadm trigger
+    run_cmd ldconfig
+
+    # Older installer versions changed authentication configuration without
+    # recording its prior state, so never overwrite PAM/authselect blindly.
+    print_warn "Review PAM/authselect settings manually if an older installer enabled fingerprint login."
 
     # Reload system services
     run_cmd udevadm control --reload
     run_cmd udevadm trigger
     run_cmd systemctl restart fprintd.service
 
-    print_step "4/4" "Cleaning up system packages..."
-    cleanup_orphans
+    print_step "5/5" "Optional orphan-package cleanup..."
+    if [[ "$CLEANUP_ORPHANS" == "true" ]]; then
+        cleanup_orphans
+    else
+        print_ok "Skipped orphan-package cleanup (safe default)."
+    fi
+
+    rm -rf /usr/local/share/fpc1022-backup
 
     echo ""
     echo -e "${GREEN}====================================================================${NC}"
-    echo -e "${GREEN}${BOLD}  ✔ Uninstallation Complete! System restored to stock settings.${NC}"
+    echo -e "${GREEN}${BOLD}  ✔ Driver rollback steps completed.${NC}"
     echo -e "${GREEN}====================================================================${NC}"
     echo ""
 }
