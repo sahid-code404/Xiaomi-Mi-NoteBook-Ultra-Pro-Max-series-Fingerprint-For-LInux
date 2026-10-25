@@ -1,6 +1,6 @@
 [Unit]
 Description=Xiaomi FPC1022 Power Button Hardware Initialization
-Documentation=https://github.com/sahid-code404/Xiaomi-Notebook-Ultra-Max-Series-Fingerprint-For-Linux
+Documentation=https://github.com/sahid-code404/xiaomi-fprint-driver
 DefaultDependencies=no
 After=systemd-udevd.service
 Before=basic.target shutdown.target
