@@ -41,7 +41,7 @@ if grep -q ' > /etc/ld.so.conf.d/fprint.conf' install.sh; then
     fail "installer must not add its private dependency directory to the global loader path"
 fi
 grep -q "patchelf --set-rpath" install.sh || fail "Fedora prebuilt path must use a private runtime search path"
-if grep -Eq "glib2-devel|'libgcc'|'libstdc\\+\\+'" src/libfprint/packaging/arch/PKGBUILD; then
+if grep -Eq "glib2-devel|'libgcc'|'libstdc[+][+]'" src/libfprint/packaging/arch/PKGBUILD; then
     fail "Arch PKGBUILD contains non-Arch package names"
 fi
 grep -Eq '#commit=[0-9a-f]{40}' src/libfprint/packaging/arch/PKGBUILD || fail "Arch PKGBUILD source must be pinned to an exact commit"
