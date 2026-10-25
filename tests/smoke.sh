@@ -22,6 +22,9 @@ uninstall_help="$(bash uninstall.sh --help)"
 grep -q -- '--cleanup-orphans' <<< "$uninstall_help" || fail "uninstaller help is missing opt-in cleanup option"
 
 grep -q 'backup_managed_file' install.sh || fail "installer no longer records managed files"
+grep -q 'preexisting-paths.txt' install.sh || fail "installer does not distinguish pre-existing paths"
+grep -q 'created-paths.txt' install.sh || fail "installer does not track newly created paths"
+grep -q 'preexisting-paths.txt' uninstall.sh || fail "uninstaller does not preserve files with missing backups"
 grep -q 'restore_managed_paths' uninstall.sh || fail "uninstaller no longer restores managed files"
 grep -q 'SENSOR_DETECTED=true' install.sh || fail "sensor detection does not set the safety gate"
 
