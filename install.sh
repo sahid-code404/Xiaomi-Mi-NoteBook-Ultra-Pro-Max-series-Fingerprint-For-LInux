@@ -455,8 +455,8 @@ install_from_source() {
     fi
     local deploy_tmp
     deploy_tmp="$(mktemp "${target_lib}.fpc1022.XXXXXX")" || {
+        rm -rf -- "$build_tmp"
         print_err "Could not create a temporary library beside $target_lib."
-        rm -f -- "$staged_driver" 2>/dev/null || true
         return 1
     }
     if ! cp -p -- "$staged_lib" "$deploy_tmp" ||
