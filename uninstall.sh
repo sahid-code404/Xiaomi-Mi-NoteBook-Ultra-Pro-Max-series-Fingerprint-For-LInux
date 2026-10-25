@@ -103,10 +103,13 @@ revert_fedora() {
     # Remove only the exact global loader path written by older project releases.
     # Preserve this file if it contains any other settings.
     local loader_conf="/etc/ld.so.conf.d/fprint.conf"
-    if ! manifest_has_path "$loader_conf" && [[ -f "$loader_conf" ]] &&
-       [[ "$(cat "$loader_conf")" == "/usr/local/lib64/fprint-deps" ]]; then
+    local legacy_driver_backup="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
+    if ! manifest_has_path "$loader_conf" &&
+       [[ -f "$loader_conf" ]] &&
+       [[ "$(cat "$loader_conf")" == "/usr/local/lib64/fprint-deps" ]] &&
+       { [[ -f "$legacy_driver_backup" ]] || [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; }; then
         rm -f -- "$loader_conf"
-        print_ok "Removed legacy global loader path"
+        print_ok "Removed the exact legacy loader path created by an older installation"
     fi
 
     # Restore stock libfprint (do NOT delete system packages)
