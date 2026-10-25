@@ -269,9 +269,14 @@ install_fedora() {
         cp -a -- "$deps_dir" "$deps_backup"
     fi
 
-    # Deploy bundled runtime dependencies
+    # Start with only the dependency set shipped with this driver. The old
+    # directory was backed up above and is restored during uninstall.
+    rm -rf -- "$deps_dir"
     mkdir -p "$deps_dir"
-    cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"
+    if ! cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"; then
+        print_err "Could not deploy the bundled Fedora runtime libraries."
+        return 1
+    fi
     (
         cd "$deps_dir"
         ln -sf libblas.so.3.12.1 libblas.so.3; ln -sf libblas.so.3 libblas.so
@@ -632,12 +637,22 @@ configure_security() {
 # Finalize & Service Reload
 # ------------------------------------------------------------------------------
 finalize_installation() {
-    run_cmd udevadm control --reload
-    run_cmd udevadm trigger
-    run_cmd systemctl restart fprintd.service
-    sleep 1
+    if command -v udevadm >/dev/null 2>&1; then
+        run_cmd udevadm control --reload
+        run_cmd udevadm trigger
+    else
+        print_warn "udevadm is unavailable; reconnect the reader or reload udev manually."
+    fi
 
-    print_ok "Reloaded system services and restarted fprintd"
+    if command -v systemctl >/dev/null 2>&1 &&
+       systemctl cat fprintd.service >/dev/null 2>&1; then
+        run_cmd systemctl restart fprintd.service
+        sleep 1
+        print_ok "Reloaded system services and restarted fprintd"
+    else
+        print_warn "fprintd.service is not available to systemd. Install/configure fprintd for this distribution and restart it manually."
+    fi
+
     print_warn "Login authentication was not changed. Enable fingerprint PAM only after repeated verification succeeds."
 }
 
