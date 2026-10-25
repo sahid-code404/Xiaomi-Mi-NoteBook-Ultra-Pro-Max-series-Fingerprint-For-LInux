@@ -33,7 +33,6 @@ A laptop model name alone does not guarantee the sensor is supported.
 ```bash
 git clone https://github.com/sahid-code404/xiaomi-fprint-driver.git
 cd xiaomi-fprint-driver
-less install.sh
 sudo ./install.sh
 ```
 
