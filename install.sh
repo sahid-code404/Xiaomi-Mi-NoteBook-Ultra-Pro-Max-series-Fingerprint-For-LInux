@@ -22,6 +22,7 @@ BACKUP_ROOT="/usr/local/share/fpc1022-backup"
 BUILD_MODE=false
 ASSUME_YES=false
 VERBOSE=false
+SENSOR_DETECTED=false
 
 print_banner() {
     cat << "EOF"
@@ -97,7 +98,7 @@ backup_managed_file() {
     local manifest="$BACKUP_ROOT/managed-paths.txt"
 
     mkdir -p "$BACKUP_ROOT"
-    if [[ -e "$target" && ! -e "$backup" ]]; then
+    if [[ ( -e "$target" || -L "$target" ) && ! -e "$backup" && ! -L "$backup" ]]; then
         mkdir -p "$(dirname "$backup")"
         cp -a -- "$target" "$backup"
     fi
@@ -152,6 +153,7 @@ detect_distro() {
 
 check_sensor() {
     if lsusb -d 10a5:9200 >/dev/null 2>&1; then
+        SENSOR_DETECTED=true
         print_ok "Detected FPC1022 fingerprint sensor (10a5:9200)"
     else
         print_warn "Sensor '10a5:9200' not found in lsusb. Ensure it is enabled in BIOS/UEFI."
@@ -430,6 +432,14 @@ configure_power_button() {
             cp -p "$SCRIPT_DIR/configs/fpc1022-wake.service" /etc/systemd/system/fpc1022-wake.service
             chmod 644 /etc/systemd/system/fpc1022-wake.service
             if command -v systemctl >/dev/null 2>&1; then
+                local state_file="$BACKUP_ROOT/fpc1022-wake-service.state"
+                if [[ ! -f "$state_file" ]]; then
+                    if systemctl is-enabled fpc1022-wake.service >/dev/null 2>&1; then
+                        printf 'enabled\n' > "$state_file"
+                    else
+                        printf 'disabled\n' > "$state_file"
+                    fi
+                fi
                 run_cmd systemctl daemon-reload
                 run_cmd systemctl enable fpc1022-wake.service
             fi
@@ -516,7 +526,11 @@ main() {
     esac
 
     print_step "3/5" "Setting up power button handling..."
-    configure_power_button
+    if [[ "$SENSOR_DETECTED" == "true" ]]; then
+        configure_power_button
+    else
+        print_warn "Fingerprint sensor not detected; skipping power-button and wake-service changes."
+    fi
 
     print_step "4/5" "Applying security policies..."
     configure_security
