@@ -178,7 +178,7 @@ revert_arch() {
             return 1
         fi
     fi
-    if pacman -S libfprint fprintd; then
+    if pacman -S --overwrite 'usr/lib/libfprint-2.so.*' libfprint fprintd; then
         print_ok "Restored stock Arch libfprint packages"
     else
         print_err "Could not restore stock packages. Resolve the package conflict before using fingerprint authentication."
@@ -241,11 +241,21 @@ revert_generic_source() {
     local backup="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
     local target="$lib_dir/libfprint-2.so.2.0.0"
     if [[ -f "$backup" ]]; then
-        cp -p -- "$backup" "$target"
+        local restore_tmp
+        restore_tmp="$(mktemp "${target}.restore.XXXXXX")" || {
+            print_err "Could not create a temporary file beside $target; backup was preserved at $backup."
+            return 1
+        }
+        if ! cp -p -- "$backup" "$restore_tmp" || ! mv -f -- "$restore_tmp" "$target"; then
+            rm -f -- "$restore_tmp"
+            print_err "Could not restore $target; backup was preserved at $backup."
+            return 1
+        fi
         ln -sf libfprint-2.so.2.0.0 "$lib_dir/libfprint-2.so.2"
         print_ok "Restored saved libfprint library at $target"
     else
-        print_warn "No original libfprint backup was found for $lib_dir. Reinstall the distribution's libfprint package manually."
+        print_err "No original libfprint backup was found for $lib_dir. Refusing to report successful rollback; reinstall the distribution's libfprint package manually."
+        return 1
     fi
     run_cmd ldconfig
 }
@@ -418,16 +428,21 @@ main() {
             run_cmd systemctl start fpc1022-wake.service
         fi
     fi
-    run_cmd udevadm control --reload
-    run_cmd udevadm trigger
+    if command -v udevadm >/dev/null 2>&1; then
+        run_cmd udevadm control --reload
+        run_cmd udevadm trigger
+    else
+        print_warn "udevadm unavailable; reload udev rules manually if hardware permissions do not update."
+    fi
     run_cmd ldconfig
 
     # Older installer versions changed authentication configuration without
     # recording its prior state, so never overwrite PAM/authselect blindly.
     print_warn "Review PAM/authselect settings manually if an older installer enabled fingerprint login."
 
-    # Restart fprintd after library restoration, if it is installed.
-    if systemctl is-active --quiet fprintd.service; then
+    # Restart fprintd after library restoration, when systemd and the unit exist.
+    if command -v systemctl >/dev/null 2>&1 &&
+       systemctl is-active --quiet fprintd.service; then
         run_cmd systemctl restart fprintd.service
     fi
 
