@@ -59,7 +59,8 @@ Available options:
 | Option | Meaning |
 | --- | --- |
 | `--build` | Build the vendored source instead of using an available prebuilt package/library |
-| `--yes` | Skip the prompt when the sensor is not detected |
+| `--power-button` | Opt in to the power-button/logind configuration and resume helper |
+| `--yes` | Continue if the sensor is not detected |
 | `--verbose` | Show command output for troubleshooting |
 | `--help` | Show options and exit |
 
@@ -68,6 +69,14 @@ For example, to build from source:
 ```bash
 sudo ./install.sh --build
 ```
+
+The power-button helper and logind policy are separate, opt-in changes. Enable them only if you need that integration:
+
+```bash
+sudo ./install.sh --power-button
+```
+
+These options can be combined, for example `sudo ./install.sh --build --power-button`.
 
 The source build needs the development dependencies for GLib/GIO, libgusb, OpenSSL, OpenCV, Meson, Ninja, a C/C++ toolchain, and the distribution-specific integration libraries. The installer attempts to install known prerequisites on supported package-manager families.
 
@@ -161,7 +170,7 @@ For developer checks:
 ```bash
 bash -n install.sh uninstall.sh
 sh -n configs/fpc1022-sleep-wake
-./tests/smoke.sh
+bash tests/smoke.sh
 ```
 
 See [docs/TESTING.md](docs/TESTING.md) for the release checklist and test-report template.
