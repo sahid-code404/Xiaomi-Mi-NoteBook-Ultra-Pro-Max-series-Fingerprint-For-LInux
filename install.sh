@@ -110,6 +110,15 @@ run_cmd() {
     return "$status"
 }
 
+# Optional integration steps should report failures without aborting a driver
+# install after the runtime library has already been replaced.
+try_cmd() {
+    if ! run_cmd "$@"; then
+        print_warn "Optional integration command failed; continue with the driver installed: $*"
+    fi
+    return 0
+}
+
 # Preserve any pre-existing file before this installer manages it. Backups
 # are kept outside package-owned paths so uninstall can restore prior state.
 backup_managed_file() {
@@ -324,12 +333,12 @@ install_fedora() {
 
     # SELinux contexts
     if command -v chcon >/dev/null 2>&1; then
-        run_cmd chcon -t lib_t /usr/lib64/libfprint-2.so*
-        run_cmd chcon -R -t lib_t "$deps_dir"
+        try_cmd chcon -t lib_t /usr/lib64/libfprint-2.so*
+        try_cmd chcon -R -t lib_t "$deps_dir"
     fi
     if command -v restorecon >/dev/null 2>&1; then
-        run_cmd restorecon -v /usr/lib64/libfprint-2.so*
-        run_cmd restorecon -Rv "$deps_dir"
+        try_cmd restorecon -v /usr/lib64/libfprint-2.so*
+        try_cmd restorecon -Rv "$deps_dir"
     fi
 
     run_cmd ldconfig
@@ -488,10 +497,10 @@ install_from_source() {
     rm -rf -- "$build_tmp"
 
     if command -v chcon >/dev/null 2>&1; then
-        run_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
+        try_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
     fi
     if command -v restorecon >/dev/null 2>&1; then
-        run_cmd restorecon -v "${lib_dir}/libfprint-2.so"*
+        try_cmd restorecon -v "${lib_dir}/libfprint-2.so"*
     fi
 
     run_cmd ldconfig
@@ -525,7 +534,7 @@ configure_power_button() {
         [[ ! -f "$dconf_dir/locks/01-power-button" ]] || backup_managed_file "$dconf_dir/locks/01-power-button"
         rm -f "$dconf_dir/01-power-button" "$dconf_dir/locks/01-power-button"
         if command -v dconf >/dev/null 2>&1; then
-            run_cmd dconf update
+            try_cmd dconf update
         fi
         print_ok "Reset desktop power overrides (managed in GNOME/KDE Settings)"
     fi
@@ -601,8 +610,8 @@ configure_power_button() {
                         fi
                     } > "$state_file"
                 fi
-                run_cmd systemctl daemon-reload
-                run_cmd systemctl enable fpc1022-wake.service
+                try_cmd systemctl daemon-reload
+                try_cmd systemctl enable fpc1022-wake.service
             fi
         fi
 
@@ -638,15 +647,15 @@ configure_security() {
 # ------------------------------------------------------------------------------
 finalize_installation() {
     if command -v udevadm >/dev/null 2>&1; then
-        run_cmd udevadm control --reload
-        run_cmd udevadm trigger
+        try_cmd udevadm control --reload
+        try_cmd udevadm trigger
     else
         print_warn "udevadm is unavailable; reconnect the reader or reload udev manually."
     fi
 
     if command -v systemctl >/dev/null 2>&1 &&
        systemctl cat fprintd.service >/dev/null 2>&1; then
-        run_cmd systemctl restart fprintd.service
+        try_cmd systemctl restart fprintd.service
         sleep 1
         print_ok "Reloaded system services and restarted fprintd"
     else
