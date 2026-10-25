@@ -275,7 +275,10 @@ install_fedora() {
     local deps_backup="$backup_dir/previous-fprint-deps"
     if [[ -d "$deps_dir" && ! -d "$deps_backup" ]]; then
         mkdir -p "$backup_dir"
-        cp -a -- "$deps_dir" "$deps_backup"
+        if ! cp -a -- "$deps_dir" "$deps_backup"; then
+            print_err "Could not back up the existing runtime dependency directory; refusing to replace it."
+            return 1
+        fi
     fi
 
     # Start with only the dependency set shipped with this driver. The old
