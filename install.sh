@@ -232,11 +232,15 @@ install_fedora() {
     # Migrate the exact global loader configuration written by older project
     # releases. Do not delete a custom file containing other settings.
     local legacy_loader_conf="/etc/ld.so.conf.d/fprint.conf"
+    local legacy_driver_backup="$BACKUP_ROOT/libfprint-2.so.2.0.0.stock-backup"
     if [[ -f "$legacy_loader_conf" ]] &&
-       [[ "$(cat "$legacy_loader_conf")" == "/usr/local/lib64/fprint-deps" ]]; then
+       [[ "$(cat "$legacy_loader_conf")" == "/usr/local/lib64/fprint-deps" ]] &&
+       { [[ -f "$legacy_driver_backup" ]] || [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; }; then
         rm -f -- "$legacy_loader_conf"
         run_cmd ldconfig
-        print_warn "Removed the legacy global loader path from an earlier installation."
+        print_warn "Removed the exact legacy loader path because a previous driver backup was found."
+    else
+        print_warn "Preserved existing /etc/ld.so.conf.d/fprint.conf because previous ownership could not be verified."
     fi
 
     if [[ "$BUILD_MODE" == "true" ]] ||
