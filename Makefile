@@ -1,4 +1,4 @@
-SHELL := /usr/bin/env bash
+SHELL := /bin/bash
 
 LIBFPRINT_DIR ?= src/libfprint
 BUILD_DIR ?= $(LIBFPRINT_DIR)/build
