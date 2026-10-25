@@ -85,7 +85,17 @@ manifest_has_path() {
 is_managed_or_matching() {
     local target="$1"
     local template="${2:-}"
+    local backup_root="/usr/local/share/fpc1022-backup"
+    local backup="$backup_root/config-backups/${target#/}"
+
     if manifest_has_path "$target"; then
+        # If an originally existing file has lost its backup, leave it in
+        # place. The later restoration pass must not interpret a missing
+        # backup as permission to delete the current configuration.
+        if grep -Fqx -- "$target" "$backup_root/preexisting-paths.txt" 2>/dev/null &&
+           [[ ! -e "$backup" && ! -L "$backup" ]]; then
+            return 1
+        fi
         return 0
     fi
     if [[ -n "$template" && -f "$SCRIPT_DIR/$template" && -f "$target" ]] &&
