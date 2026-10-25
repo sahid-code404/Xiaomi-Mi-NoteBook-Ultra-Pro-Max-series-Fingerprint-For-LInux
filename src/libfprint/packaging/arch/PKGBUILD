@@ -34,7 +34,8 @@ checkdepends=('cairo' 'umockdev')
 optdepends=('fprintd: D-Bus daemon and PAM module for fingerprint readers')
 provides=('libfprint=1.94.100' 'libfprint-2.so')
 conflicts=('libfprint')
-source=("$pkgname::git+https://github.com/gotenksIN/libfprint-fpc-disum.git#tag=v$pkgver")
+# Pin the exact upstream release commit so builds do not follow a movable tag.
+source=("$pkgname::git+https://github.com/gotenksIN/libfprint-fpc-disum.git#commit=80a4b5ec612892c5c056c48dddaa561452cf37ec")
 sha256sums=('SKIP')
 
 build() {
