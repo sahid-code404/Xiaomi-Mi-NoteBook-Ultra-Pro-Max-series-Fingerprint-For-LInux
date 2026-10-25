@@ -60,6 +60,7 @@ Available options:
 | --- | --- |
 | `--build` | Build the vendored source instead of using an available prebuilt package/library |
 | `--power-button` | Opt in to the power-button/logind configuration and resume helper |
+| `--protect-enrollment` | Opt in to a system-wide administrator-authorization rule for fingerprint enrollment/deletion |
 | `--yes` | Continue if the sensor is not detected |
 | `--verbose` | Show command output for troubleshooting |
 | `--help` | Show options and exit |
@@ -83,6 +84,8 @@ The source build needs the development dependencies for GLib/GIO, libgusb, OpenS
 ### Updates and package management
 
 This installer intentionally **does not lock or exclude system packages**. That avoids silently blocking security and bug-fix updates. However, a distribution update can replace a manually installed library or cause the patched driver to stop loading. Re-test the reader after a `libfprint` or distribution upgrade and rebuild/reinstall this project if necessary.
+
+For Fedora's bundled-library path, dependencies are placed in a private directory and loaded through a per-library RUNPATH instead of adding that directory to the global dynamic-loader configuration. The main driver library is still installed over the distribution library, so an OS update may replace it.
 
 The long-term preferred distribution model is a native, versioned package with explicit dependencies and a clean upgrade path rather than replacing a package-owned shared library in place.
 
@@ -119,6 +122,8 @@ When the fingerprint sensor is detected, the installer can configure the FPC1022
 The drop-in changes power-button behavior, so review `configs/10-power-button.conf` before installing. This project backs up managed files that already exist, then restores those backups during uninstallation. Older releases did not record all pre-existing state; see the rollback notes below when removing an older installation.
 
 No user is added to the `input` group by the installer. USB access is scoped to the sensor's vendor/product identifier by the supplied udev rule.
+
+A separate optional policy can require administrator authorization for fprintd enrollment/deletion. Enable it explicitly with `sudo ./install.sh --protect-enrollment`; it affects the system's fprintd policy, not just this sensor. Review `configs/50-fprintd-auth.rules` before opting in.
 
 ## Uninstall and rollback
 
