@@ -95,11 +95,19 @@ print_warn() { echo -e "    ${YELLOW}!${NC} $*"; }
 print_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 run_cmd() {
+    local status=0
     if [[ "$VERBOSE" == "true" ]]; then
-        "$@"
+        "$@" || status=$?
     else
-        "$@" >/dev/null 2>&1
+        "$@" >/dev/null 2>&1 || status=$?
     fi
+    if (( status != 0 )); then
+        print_err "Command failed (exit $status): $*"
+        if [[ "$VERBOSE" != "true" ]]; then
+            print_warn "Rerun with --verbose to see the command output."
+        fi
+    fi
+    return "$status"
 }
 
 # Preserve any pre-existing file before this installer manages it. Backups
@@ -407,9 +415,13 @@ install_from_source() {
 
     local build_tmp
     build_tmp="$(mktemp -d /tmp/fpc1022_build.XXXXXX)"
-    cp -r "$src_dir" "$build_tmp/src"
+    if ! cp -r "$src_dir" "$build_tmp/src"; then
+        rm -rf -- "$build_tmp"
+        print_err "Could not stage the libfprint source tree."
+        return 1
+    fi
 
-    (
+    if ! (
         cd "$build_tmp/src"
         meson setup build --prefix=/usr --libdir="${lib_dir#/usr/}" -Ddrivers=all -Ddoc=false \
             -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
@@ -419,15 +431,24 @@ install_from_source() {
         # entire libfprint development tree over package-owned files would make
         # rollback incomplete and risk trampling headers/pkg-config metadata.
         DESTDIR="$build_tmp/stage" ninja -C build install
-    )
+    ); then
+        rm -rf -- "$build_tmp"
+        print_err "The libfprint source build failed; the existing runtime library was left in place."
+        return 1
+    fi
+
     local staged_lib="$build_tmp/stage$target_lib"
     if [[ ! -f "$staged_lib" ]]; then
-        rm -rf "$build_tmp"
+        rm -rf -- "$build_tmp"
         print_err "Staged libfprint library was not found at $staged_lib"
-        exit 1
+        return 1
     fi
-    cp -p "$staged_lib" "$target_lib"
-    rm -rf "$build_tmp"
+    if ! install -m 0644 -- "$staged_lib" "$target_lib"; then
+        rm -rf -- "$build_tmp"
+        print_err "Could not deploy the staged libfprint runtime library to $target_lib."
+        return 1
+    fi
+    rm -rf -- "$build_tmp"
 
     if command -v chcon >/dev/null 2>&1; then
         run_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
