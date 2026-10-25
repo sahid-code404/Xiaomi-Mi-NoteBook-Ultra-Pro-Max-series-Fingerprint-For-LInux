@@ -24,6 +24,7 @@ ASSUME_YES=false
 VERBOSE=false
 SENSOR_DETECTED=false
 POWER_BUTTON_MODE=false
+PROTECT_ENROLLMENT=false
 
 print_banner() {
     cat << "EOF"
@@ -41,6 +42,7 @@ Options:
   -b, --build       Compile driver from source instead of using pre-built binaries
   -y, --yes         Continue if the fingerprint sensor is not detected
   -p, --power-button Enable optional power-button/logind integration
+      --protect-enrollment Require administrator authorization for fprintd enrollment/deletion
   -v, --verbose     Show detailed command outputs
   -h, --help        Show this help message and exit
 
@@ -65,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -p|--power-button)
             POWER_BUTTON_MODE=true
+            shift
+            ;;
+        --protect-enrollment)
+            PROTECT_ENROLLMENT=true
             shift
             ;;
         -v|--verbose)
@@ -605,10 +611,12 @@ main() {
     fi
 
     print_step "4/5" "Applying security policies..."
-    if [[ "$SENSOR_DETECTED" == "true" ]]; then
+    if [[ "$SENSOR_DETECTED" == "true" && "$PROTECT_ENROLLMENT" == "true" ]]; then
         configure_security
-    else
+    elif [[ "$PROTECT_ENROLLMENT" == "true" ]]; then
         print_warn "Fingerprint sensor not detected; skipping system-wide fprintd Polkit policy."
+    else
+        print_ok "Optional enrollment authorization policy skipped."
     fi
 
     print_step "5/5" "Finalizing system services..."
