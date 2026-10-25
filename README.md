@@ -60,9 +60,9 @@ Bus 003 Device 003: ID 10a5:9200 FPC FPC Sensor Controller
 
 ## Key Features
 
-- **Unified 1-Click Installer**: Deploys the FPC1022 biometric driver, early-boot hardware power button wake service, and desktop coexistence policies in one automated step.
+- **Unified 1-Click Installer**: Deploys the FPC1022 biometric driver, early-boot hardware power button wake service, and clean coexistence policies in one automated step.
 - **Cold-Boot & Resume Power Button Wake**: Fixes the dormant power button on fresh boots and after suspend by signaling USB S0 working state to the FPC microcontroller immediately upon boot and resume.
-- **Accidental Suspend Prevention**: Reconfigures GNOME to `'interactive'` power button action, showing the power dialog instead of putting the laptop to sleep when touching the sensor.
+- **Native User-Determined Power Button Control**: Leaves power button behavior 100% in user hands via standard desktop settings (`Settings -> Power`), while `systemd-logind` honors desktop inhibitors with instant response (`HoldoffTimeoutSec=0`).
 - **Clean Logind Poweroff Fallback**: Configures `/etc/systemd/logind.conf.d/10-power-button.conf` (`PowerKeyIgnoreInhibited=no`, `HandlePowerKey=poweroff`) to honor desktop inhibitors while ensuring clean shutdown when uninhibited (lock screen, TTY, display manager).
 - **Seamless Linux PAM Integration**: Works natively with `fprintd` and standard Linux PAM (`sudo`, GDM, SDDM, LightDM, Polkit, lock screens).
 - **Desktop Settings Integration**: Direct GUI support in GNOME Settings (`Settings -> Users -> Fingerprint Login`) and KDE System Settings.
@@ -108,11 +108,9 @@ This repository addresses both the hardware microcontroller state and the deskto
    PowerKeyIgnoreInhibited=no
    HoldoffTimeoutSec=0
    ```
-   - Setting `PowerKeyIgnoreInhibited=no` ensures that while a desktop session (like GNOME) is running with an active inhibitor, `logind` defers power key events to the desktop environment. When no desktop inhibitor is present (such as at the login screen, lock screen, or a TTY), pressing the power button safely performs a clean system `poweroff` instead of an unstable sleep state.
+   - Setting `PowerKeyIgnoreInhibited=no` ensures that while a desktop session (like GNOME or KDE) is running with an active inhibitor, `logind` defers power key events completely to the desktop environment. You can freely choose your desired action in **GNOME/KDE Settings &rarr; Power &rarr; When Power Button is Pressed** (Nothing, Suspend, Power Off, or Interactive Menu) without forced overrides. When no desktop session is active (such as at the login screen, lock screen, or a TTY), pressing the power button safely performs a clean system `poweroff`.
    - Setting `HoldoffTimeoutSec=0` disables systemd's default 30-second post-resume / post-boot ignore period, ensuring instant response to every power key press without dropped clicks or lag after waking.
-3. **GNOME Dconf Configuration & Lock (`/etc/dconf/db/local.d/01-power-button`)**:
-   Sets `org.gnome.settings-daemon.plugins.power power-button-action` to `'interactive'` and locks it system-wide. Instead of suspending the machine, a short press prompts the user with the interactive power dialog (Power Off / Restart / Cancel), avoiding unwanted sleep cycles.
-4. **User Input Group**:
+3. **User Input Group**:
    Adds the target user to the `input` group (`usermod -a -G input "$TARGET_USER"`) for direct event device access.
 
 ---
@@ -160,10 +158,9 @@ sudo ./install.sh
 8. Deploys `/etc/udev/rules.d/99-fpc1022-wake.rules` to configure session access tags.
 9. Deploys and enables `/etc/systemd/system/fpc1022-wake.service` for system boot initialization.
 10. Installs `/usr/lib/systemd/system-sleep/fpc1022-wake` to restore power button state upon waking from suspend/hibernate.
-11. Installs `/etc/systemd/logind.conf.d/10-power-button.conf` (`HandlePowerKey=poweroff`, `PowerKeyIgnoreInhibited=no`) and reloads `systemd-logind`.
-12. Configures GNOME power button action to `'interactive'` via `/etc/dconf/db/local.d/01-power-button` and updates `dconf`.
-13. Adds target user to the `input` group for direct event handling.
-14. Restarts `fprintd.service` and executes immediate hardware initialization.
+11. Installs `/etc/systemd/logind.conf.d/10-power-button.conf` (`HandlePowerKey=poweroff`, `PowerKeyIgnoreInhibited=no`, `HoldoffTimeoutSec=0`) and reloads `systemd-logind`.
+12. Adds target user to the `input` group for direct event handling.
+13. Restarts `fprintd.service` and executes immediate hardware initialization.
 
 ---
 
@@ -187,11 +184,16 @@ Available finger identifiers:
 - `right-thumb`, `right-index-finger`, `right-middle-finger`, `right-ring-finger`, `right-little-finger`
 - `left-thumb`, `left-index-finger`, `left-middle-finger`, `left-ring-finger`, `left-little-finger`
 
-> **Tips for 5-Stage Enrollment on Small Sensors:**
-> - The sensor will prompt you **5 times** (`Enroll result: enroll-stage-passed`).
-> - For stage 1 and 2, place the center of your finger pad directly on the sensor.
-> - For stages 3 to 5, gently tilt your finger slightly to capture edge areas.
-> - Press firmly and steadily until you see `Enroll result: enroll-completed`.
+> **Why Enrollment is 5 Stages & How to Capture Full Finger Edges / Sides:**
+> - Standard Linux `libfprint` image devices require **5 scans** (unlike mobile phones which prompt 15–20 times with interactive animations).
+> - The **SIGFM SIFT algorithm** builds a rich geometric keypoint map across all 5 scans.
+> - To ensure the sensor recognizes your finger from any angle or edge, deliberately vary your finger position during each prompt:
+>   - **Stage 1**: Flat center of your fingertip pad.
+>   - **Stage 2**: Tip / top of your finger.
+>   - **Stage 3**: Tilted slightly to the left side edge.
+>   - **Stage 4**: Tilted slightly to the right side edge.
+>   - **Stage 5**: Lower base of the fingerprint pad.
+> - This produces a complete multi-angle biometric template so future authentications match instantly whether centered or at an angle.
 
 ### 2. Testing & Verification
 

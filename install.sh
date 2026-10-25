@@ -456,40 +456,15 @@ configure_power_button() {
         echo -e "${GREEN}[✔] Added ${TARGET_USER} to input group.${NC}"
     fi
 
-    # 3. GNOME power button action (set to 'interactive' to show power menu instead of suspend)
+    # 3. Clean up any previous dconf power-button overrides so desktop settings remain 100% user-determined
     local dconf_dir="/etc/dconf/db/local.d"
-    mkdir -p "$dconf_dir" "$dconf_dir/locks"
-    cat > "$dconf_dir/01-power-button" << 'EOF'
-[org/gnome/settings-daemon/plugins/power]
-power-button-action='interactive'
-EOF
-    cat > "$dconf_dir/locks/01-power-button" << 'EOF'
-/org/gnome/settings-daemon/plugins/power/power-button-action
-EOF
-    echo -e "${GREEN}[✔] Created GNOME system-wide power button setting and lock in ${dconf_dir}${NC}"
-
-    if command -v dconf >/dev/null 2>&1; then
-        echo -e "${BLUE}[*] Updating dconf database...${NC}"
-        dconf update 2>/dev/null || true
-        echo -e "${GREEN}[✔] dconf database updated.${NC}"
-    fi
-
-    # Also apply directly to active user session if running GNOME
-    if [[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]] && command -v gsettings >/dev/null 2>&1; then
-        local user_uid
-        user_uid="$(id -u "$TARGET_USER" 2>/dev/null || echo "")"
-        if [[ -n "$user_uid" ]]; then
-            sudo -u "$TARGET_USER" \
-                XDG_RUNTIME_DIR="/run/user/${user_uid}" \
-                DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
-                gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
-            if command -v dbus-run-session >/dev/null 2>&1; then
-                sudo -u "$TARGET_USER" \
-                    XDG_RUNTIME_DIR="/run/user/${user_uid}" \
-                    dbus-run-session \
-                    gsettings set org.gnome.settings-daemon.plugins.power power-button-action 'interactive' 2>/dev/null || true
-            fi
+    if [[ -f "$dconf_dir/01-power-button" || -f "$dconf_dir/locks/01-power-button" ]]; then
+        echo -e "${BLUE}[*] Removing dconf overrides to leave power button action user-configurable in Desktop Settings...${NC}"
+        rm -f "$dconf_dir/01-power-button" "$dconf_dir/locks/01-power-button"
+        if command -v dconf >/dev/null 2>&1; then
+            dconf update 2>/dev/null || true
         fi
+        echo -e "${GREEN}[✔] Power button action left to user preference (GNOME/KDE Settings).${NC}"
     fi
 
     # 4. Compile and install early hardware initializer (fpc1022-wake)
@@ -589,16 +564,16 @@ finalize_installation() {
     echo -e "${GREEN}==============================================================================${NC}"
     echo -e "${GREEN}${BOLD}     [✔] UNIFIED INSTALLATION COMPLETE!${NC}"
     echo -e "${GREEN}${BOLD}         - FPC1022 Fingerprint Driver: Installed & Running${NC}"
-    echo -e "${GREEN}${BOLD}         - Power Button Cold-Boot Wake: Initialized & Enabled at Boot/Resume${NC}"
-    echo -e "${GREEN}${BOLD}         - Power Button Policy: Configured (Interactive / No Accidental Suspend)${NC}"
+    echo -e "${GREEN}${BOLD}         - Power Button Hardware Wake: Initialized & Enabled at Boot/Resume${NC}"
+    echo -e "${GREEN}${BOLD}         - Power Button Policy: Configured (Instant Response & Desktop-Managed)${NC}"
     echo -e "${GREEN}==============================================================================${NC}"
     echo ""
     echo -e "${BOLD}Summary of Applied Changes:${NC}"
     echo -e "  • ${CYAN}Biometric Stack:${NC} Libfprint patched with FPC1022 Match-on-Host & SIGFM OpenCV matcher"
     echo -e "  • ${CYAN}Cold-Boot Wake:${NC} /usr/local/bin/fpc1022-wake, udev rule & systemd service (MCU S0 working state)"
     echo -e "  • ${CYAN}Sleep/Resume Hook:${NC} /usr/lib/systemd/system-sleep/fpc1022-wake (immediate power button on resume)"
-    echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors with clean poweroff fallback"
-    echo -e "  • ${CYAN}Desktop Action:${NC} GNOME power-button-action set to 'interactive' (opens power menu)"
+    echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors (HoldoffTimeoutSec=0, no delay)"
+    echo -e "  • ${CYAN}Desktop Action:${NC} User-determined (manageable via GNOME/KDE Power Settings: Nothing/Suspend/PowerOff)"
     echo -e "  • ${CYAN}User Group:${NC} Added '${BOLD}${TARGET_USER}${NC}' to 'input' group"
     echo ""
     echo -e "${BOLD}Next Steps for Enrollment & Verification:${NC}"
