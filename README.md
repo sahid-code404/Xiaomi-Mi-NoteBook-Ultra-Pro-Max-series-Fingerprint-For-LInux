@@ -62,6 +62,7 @@ Bus 003 Device 003: ID 10a5:9200 FPC FPC Sensor Controller
 
 - **Unified 1-Click Installer**: Deploys the FPC1022 biometric driver, early-boot hardware power button wake service, and clean coexistence policies in one automated step.
 - **Cold-Boot & Resume Power Button Wake**: Fixes the dormant power button on fresh boots and after suspend by signaling USB S0 working state to the FPC microcontroller immediately upon boot and resume.
+- **Password-Guarded Credential Protection**: Installs a PolicyKit security rule (`50-fprintd-auth.rules`) requiring administrator/sudo password verification whenever enrolling or deleting fingerprints, preventing unauthorized credential tampering.
 - **Native User-Determined Power Button Control**: Leaves power button behavior 100% in user hands via standard desktop settings (`Settings -> Power`), while `systemd-logind` honors desktop inhibitors with instant response (`HoldoffTimeoutSec=0`).
 - **Clean Logind Poweroff Fallback**: Configures `/etc/systemd/logind.conf.d/10-power-button.conf` (`PowerKeyIgnoreInhibited=no`, `HandlePowerKey=poweroff`) to honor desktop inhibitors while ensuring clean shutdown when uninhibited (lock screen, TTY, display manager).
 - **Seamless Linux PAM Integration**: Works natively with `fprintd` and standard Linux PAM (`sudo`, GDM, SDDM, LightDM, Polkit, lock screens).
@@ -381,7 +382,8 @@ Ensure `/etc/dnf/dnf.conf` retains `excludepkgs=libfprint*`.
 ├── .gitignore            # Git ignore rules for build and cache artifacts
 ├── configs/              # Managed system configuration drop-ins
 │   ├── 10-power-button.conf     # systemd-logind power button override
-│   ├── 99-fpc1022-wake.rules    # udev boot wake rule for 10a5:9200
+│   ├── 50-fprintd-auth.rules    # PolicyKit rule (password required to delete/enroll)
+│   ├── 99-fpc1022-wake.rules    # udev session access rule for 10a5:9200
 │   ├── fpc1022-wake.service     # early boot systemd initialization service
 │   └── fpc1022-sleep-wake       # systemd-sleep resume wake hook
 ├── tools/                # Hardware utility source code

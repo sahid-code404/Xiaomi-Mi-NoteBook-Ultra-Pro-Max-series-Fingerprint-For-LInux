@@ -1,0 +1,10 @@
+// PolicyKit Security Policy for Xiaomi Notebook Fingerprint Authentication
+// Enforces administrator / sudo password verification whenever enrolling or deleting fingerprints.
+// Prevents unauthorized tampering or deletion of enrolled biometric credentials.
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "net.reactivated.fprint.device.enroll" ||
+        action.id == "net.reactivated.fprint.device.setusername") {
+        return polkit.Result.AUTH_ADMIN;
+    }
+});

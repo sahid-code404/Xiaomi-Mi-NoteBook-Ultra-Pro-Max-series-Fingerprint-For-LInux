@@ -148,6 +148,13 @@ revert_power_button() {
         rm -f /usr/local/bin/fpc1022-wake
         echo -e "${GREEN}[✔] Removed /usr/local/bin/fpc1022-wake binary.${NC}"
     fi
+
+    # 7. Remove Polkit security policy
+    if [[ -f /etc/polkit-1/rules.d/50-fprintd-auth.rules ]]; then
+        echo -e "${BLUE}[*] Removing /etc/polkit-1/rules.d/50-fprintd-auth.rules...${NC}"
+        rm -f /etc/polkit-1/rules.d/50-fprintd-auth.rules
+        echo -e "${GREEN}[✔] Removed Polkit security policy.${NC}"
+    fi
 }
 
 case "$DISTRO_ID" in

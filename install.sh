@@ -534,6 +534,20 @@ configure_power_button() {
     fi
 }
 
+# Polkit Security Configuration: Enforce password authentication for fingerprint deletion & enrollment
+configure_polkit_security() {
+    echo -e "${BLUE}[*] Configuring PolicyKit security (password protection for fingerprint credentials)...${NC}"
+    local polkit_rule="$SCRIPT_DIR/configs/50-fprintd-auth.rules"
+    local polkit_dir="/etc/polkit-1/rules.d"
+    
+    if [[ -d "$polkit_dir" && -f "$polkit_rule" ]]; then
+        echo -e "${BLUE}[*] Installing Polkit rule to ${polkit_dir}/50-fprintd-auth.rules...${NC}"
+        cp -p "$polkit_rule" "$polkit_dir/50-fprintd-auth.rules"
+        chmod 644 "$polkit_dir/50-fprintd-auth.rules"
+        echo -e "${GREEN}[✔] Polkit security rule active: Sudo/admin password required to delete or enroll prints.${NC}"
+    fi
+}
+
 # Post-install service reload and validation
 finalize_installation() {
     echo -e "${BLUE}[*] Reloading udev rules and restarting fprintd.service...${NC}"
@@ -557,6 +571,9 @@ finalize_installation() {
         fi
     fi
 
+    # Configure Polkit security policy (password required to delete/enroll)
+    configure_polkit_security
+
     # Configure power button handling
     configure_power_button
 
@@ -564,12 +581,14 @@ finalize_installation() {
     echo -e "${GREEN}==============================================================================${NC}"
     echo -e "${GREEN}${BOLD}     [✔] UNIFIED INSTALLATION COMPLETE!${NC}"
     echo -e "${GREEN}${BOLD}         - FPC1022 Fingerprint Driver: Installed & Running${NC}"
+    echo -e "${GREEN}${BOLD}         - Biometric Security Policy: Password-Guarded Deletion/Enrollment${NC}"
     echo -e "${GREEN}${BOLD}         - Power Button Hardware Wake: Initialized & Enabled at Boot/Resume${NC}"
     echo -e "${GREEN}${BOLD}         - Power Button Policy: Configured (Instant Response & Desktop-Managed)${NC}"
     echo -e "${GREEN}==============================================================================${NC}"
     echo ""
     echo -e "${BOLD}Summary of Applied Changes:${NC}"
     echo -e "  • ${CYAN}Biometric Stack:${NC} Libfprint patched with FPC1022 Match-on-Host & SIGFM OpenCV matcher"
+    echo -e "  • ${CYAN}Security Policy:${NC} Polkit rule active (sudo/admin password required to enroll or delete fingerprints)"
     echo -e "  • ${CYAN}Cold-Boot Wake:${NC} /usr/local/bin/fpc1022-wake, udev rule & systemd service (MCU S0 working state)"
     echo -e "  • ${CYAN}Sleep/Resume Hook:${NC} /usr/lib/systemd/system-sleep/fpc1022-wake (immediate power button on resume)"
     echo -e "  • ${CYAN}Power Key Policy:${NC} logind delegated to desktop inhibitors (HoldoffTimeoutSec=0, no delay)"
