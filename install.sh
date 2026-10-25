@@ -189,7 +189,33 @@ install_fedora() {
         run_cmd dnf install -y fprintd fprintd-pam
     fi
 
+    # Migrate the exact global loader configuration written by older project
+    # releases. Do not delete a custom file containing other settings.
+    local legacy_loader_conf="/etc/ld.so.conf.d/fprint.conf"
+    if [[ -f "$legacy_loader_conf" ]] &&
+       [[ "$(cat "$legacy_loader_conf")" == "/usr/local/lib64/fprint-deps" ]]; then
+        rm -f -- "$legacy_loader_conf"
+        run_cmd ldconfig
+        print_warn "Removed the legacy global loader path from an earlier installation."
+    fi
+
     if [[ "$BUILD_MODE" == "true" ]] || [[ ! -f "$fedora_pkg/libfprint-2.so.2.0.0" ]]; then
+        install_from_source "fedora"
+        return
+    fi
+
+    # A prebuilt binary needs a private RUNPATH. If patchelf is unavailable,
+    # prefer a source build that uses system dependencies rather than adding
+    # its private libraries to the global dynamic-loader search path.
+    if ! command -v patchelf >/dev/null 2>&1; then
+        if ! run_cmd dnf install -y patchelf; then
+            print_warn "Could not install patchelf; falling back to a source build."
+            install_from_source "fedora"
+            return
+        fi
+    fi
+    if ! command -v patchelf >/dev/null 2>&1; then
+        print_warn "patchelf is unavailable; falling back to a source build."
         install_from_source "fedora"
         return
     fi
@@ -229,13 +255,23 @@ install_fedora() {
         [[ -f /usr/lib64/libcrypto.so.3 ]] && ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
         [[ -f /usr/lib64/libssl.so.3 ]] && ln -sf /usr/lib64/libssl.so.3 libssl.so
     )
-    backup_managed_file /etc/ld.so.conf.d/fprint.conf
-    echo "$deps_dir" > /etc/ld.so.conf.d/fprint.conf
+    # Patch a temporary copy so the tracked prebuilt artifact stays unchanged.
+    # The driver finds only its bundled dependencies through a private RUNPATH.
+    local staged_driver="$backup_dir/libfprint-patched.so.2.0.0"
+    cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$staged_driver"
+    patchelf --set-rpath '$ORIGIN/../local/lib64/fprint-deps' "$staged_driver"
+
+    local -a bundled_libs=()
+    mapfile -d '' -t bundled_libs < <(find "$deps_dir" -maxdepth 1 -type f -name '*.so*' -print0)
+    for dep in "${bundled_libs[@]}"; do
+        patchelf --set-rpath '$ORIGIN' "$dep"
+    done
 
     # Deploy patched driver. Preserve an existing SONAME link before enforcing
     # the standard relative link; if no link exists, rollback keeps the newly
     # created standard link after restoring the stock library.
-    cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$target_lib"
+    cp -p "$staged_driver" "$target_lib"
+    rm -f -- "$staged_driver"
     if [[ -e /usr/lib64/libfprint-2.so.2 || -L /usr/lib64/libfprint-2.so.2 ]]; then
         backup_managed_file /usr/lib64/libfprint-2.so.2
     fi
