@@ -170,15 +170,15 @@ meson test -C build --print-errorlogs
 
 The package and installer paths vary by distribution. On Debian/Ubuntu, the build uses the host multiarch library directory when it is available rather than assuming that every system stores shared libraries in `/usr/lib` or `/usr/lib64`.
 
-For developer checks:
+For developer checks, install `make` and ShellCheck, then run:
 
 ```bash
-bash -n install.sh uninstall.sh
-sh -n configs/fpc1022-sleep-wake
-bash tests/smoke.sh
+make check
+make build
+make unit-test
 ```
 
-See [docs/TESTING.md](docs/TESTING.md) for the release checklist and test-report template.
+Individual targets are documented by `make help`. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations and [docs/TESTING.md](docs/TESTING.md) for the release checklist and test-report template.
 
 ## Security model and limitations
 
