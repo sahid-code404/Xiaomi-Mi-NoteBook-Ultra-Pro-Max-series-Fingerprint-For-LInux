@@ -111,6 +111,15 @@ revert_fedora() {
 }
 
 revert_debian() {
+    # Remove our native package first if it was installed as a Debian package.
+    # This avoids a Conflicts/Replaces collision with the distribution package.
+    if dpkg-query -W -f='${Status}' libfprint-fpc1022 2>/dev/null | grep -q 'install ok installed'; then
+        if ! apt-get remove -y libfprint-fpc1022; then
+            print_err "Could not remove libfprint-fpc1022 before restoring the distribution package."
+            return 1
+        fi
+    fi
+
     # Older releases may have held these packages, but there is no state file
     # that proves those holds were added by this project. Preserve user policy.
     if apt-get install --reinstall -y libfprint-2-2 fprintd; then
@@ -124,9 +133,16 @@ revert_debian() {
 }
 
 revert_arch() {
-    # Preserve pacman.conf because this project did not record its previous
-    # contents. Explicitly install the stock packages without editing IgnorePkg.
-    if pacman -S --needed libfprint fprintd; then
+    # Restore packages even after a source build replaced files belonging to
+    # an installed package. Remove our named package if the binary package path
+    # was used, then reinstall the distribution's package.
+    if pacman -Q libfprint-fpc1022 >/dev/null 2>&1; then
+        if ! pacman -R libfprint-fpc1022; then
+            print_err "Could not remove libfprint-fpc1022 before restoring the distribution package."
+            return 1
+        fi
+    fi
+    if pacman -S libfprint fprintd; then
         print_ok "Restored stock Arch libfprint packages"
     else
         print_err "Could not restore stock packages. Resolve the package conflict before using fingerprint authentication."
