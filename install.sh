@@ -162,6 +162,23 @@ backup_managed_file() {
     printf '%s\n' "$target" >> "$manifest"
 }
 
+cleanup_legacy_fedora_loader_config() {
+    local loader_conf="/etc/ld.so.conf.d/fprint.conf"
+    local backup="$BACKUP_ROOT/libfprint-2.so.2.0.0.stock-backup"
+
+    # Only migrate the exact one-line path from this project's older releases,
+    # and only after the replacement driver has installed successfully.
+    if [[ -f "$loader_conf" ]] &&
+       [[ "$(cat "$loader_conf")" == "/usr/local/lib64/fprint-deps" ]] &&
+       { [[ -f "$backup" ]] || [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; }; then
+        rm -f -- "$loader_conf"
+        run_cmd ldconfig
+        print_warn "Removed the verified legacy global loader path after successful driver installation."
+    elif [[ -e "$loader_conf" ]]; then
+        print_warn "Preserved /etc/ld.so.conf.d/fprint.conf because its ownership or contents are not verified."
+    fi
+}
+
 detect_libdir() {
     local family="$1"
     local multiarch=""
@@ -239,20 +256,6 @@ install_fedora() {
     # Install fprintd daemon if missing
     if ! rpm -q fprintd >/dev/null 2>&1 || ! rpm -q fprintd-pam >/dev/null 2>&1; then
         run_cmd dnf install -y fprintd fprintd-pam
-    fi
-
-    # Migrate the exact global loader configuration written by older project
-    # releases. Do not delete a custom file containing other settings.
-    local legacy_loader_conf="/etc/ld.so.conf.d/fprint.conf"
-    local legacy_driver_backup="$BACKUP_ROOT/libfprint-2.so.2.0.0.stock-backup"
-    if [[ -f "$legacy_loader_conf" ]] &&
-       [[ "$(cat "$legacy_loader_conf")" == "/usr/local/lib64/fprint-deps" ]] &&
-       { [[ -f "$legacy_driver_backup" ]] || [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; }; then
-        rm -f -- "$legacy_loader_conf"
-        run_cmd ldconfig
-        print_warn "Removed the exact legacy loader path because a previous driver backup was found."
-    else
-        print_warn "Preserved existing /etc/ld.so.conf.d/fprint.conf because previous ownership could not be verified."
     fi
 
     if [[ "$BUILD_MODE" == "true" ]] ||
@@ -736,6 +739,11 @@ main() {
             fi
             ;;
     esac
+
+    if [[ "$DISTRO_ID" =~ ^(fedora|rhel|centos)$ ]] ||
+       [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
+        cleanup_legacy_fedora_loader_config
+    fi
 
     print_step "3/5" "Setting up power button handling..."
     if [[ "$SENSOR_DETECTED" == "true" && "$POWER_BUTTON_MODE" == "true" ]]; then
