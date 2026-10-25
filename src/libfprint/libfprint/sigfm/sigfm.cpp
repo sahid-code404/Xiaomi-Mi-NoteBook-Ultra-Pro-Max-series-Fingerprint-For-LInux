@@ -75,9 +75,17 @@ struct angle {
 };
 } // namespace
 
-SigfmImgInfo* sigfm_copy_info(SigfmImgInfo* info) { return new SigfmImgInfo{*info}; }
+SigfmImgInfo* sigfm_copy_info(SigfmImgInfo* info)
+{
+    return info ? new SigfmImgInfo{*info} : nullptr;
+}
 
-int sigfm_keypoints_count(SigfmImgInfo* info) { return info->keypoints.size(); }
+int sigfm_keypoints_count(SigfmImgInfo* info)
+{
+    if (!info)
+        return 0;
+    return static_cast<int>(info->keypoints.size());
+}
 
 namespace {
 constexpr unsigned char sigfm_blob_magic[4] = {'S', 'G', 'F', 'M'};
@@ -244,10 +252,15 @@ SigfmImgInfo* sigfm_deserialize_binary(const unsigned char* bytes, int len)
 
 SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height)
 {
+    if (!pix || width <= 0 || height <= 0)
+        return nullptr;
+
     try {
         cv::Mat img;
         img.create(height, width, CV_8UC1);
-        std::memcpy(img.data, pix, width * height);
+        const auto image_size = static_cast<std::size_t>(width) *
+                                static_cast<std::size_t>(height);
+        std::memcpy(img.data, pix, image_size);
         const auto roi = cv::Mat::ones(cv::Size{img.size[1], img.size[0]}, CV_8UC1);
         std::vector<cv::KeyPoint> pts;
 
@@ -264,6 +277,9 @@ SigfmImgInfo* sigfm_extract(const SigfmPix* pix, int width, int height)
 
 int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
 {
+    if (!frame || !enrolled)
+        return 0;
+
     try {
         if (frame->descriptors.empty() || enrolled->descriptors.empty())
             return 0;
@@ -325,12 +341,17 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
                     length_match) {
 
                     double product = length_1 * length_2;
+                    const double dot = (vec_1[0] * vec_2[0] +
+                                        vec_1[1] * vec_2[1]) / product;
+                    const double cross = (vec_1[0] * vec_2[1] -
+                                          vec_1[1] * vec_2[0]) / product;
+                    // Floating-point rounding can put normalized values just
+                    // outside [-1, 1], where asin/acos would return NaN.
+                    const double dot_clamped = std::max(-1.0, std::min(1.0, dot));
+                    const double cross_clamped = std::max(-1.0, std::min(1.0, cross));
                     angles.push_back({
-                        M_PI / 2 +
-                            asin((vec_1[0] * vec_2[0] + vec_1[1] * vec_2[1]) /
-                                 product),
-                        acos((vec_1[0] * vec_2[1] - vec_1[1] * vec_2[0]) /
-                             product),
+                        M_PI / 2 + asin(dot_clamped),
+                        acos(cross_clamped),
                     });
                 }
 

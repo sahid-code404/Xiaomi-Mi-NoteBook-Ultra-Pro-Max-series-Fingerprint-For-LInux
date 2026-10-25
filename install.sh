@@ -17,10 +17,14 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP_ROOT="/usr/local/share/fpc1022-backup"
 
 BUILD_MODE=false
 ASSUME_YES=false
 VERBOSE=false
+SENSOR_DETECTED=false
+POWER_BUTTON_MODE=false
+PROTECT_ENROLLMENT=false
 
 print_banner() {
     cat << "EOF"
@@ -35,8 +39,10 @@ show_help() {
 Usage: sudo ./install.sh [OPTIONS]
 
 Options:
-  -b, --build       Compile the driver from the included source tree
-  -y, --yes         Automatic yes to prompts (non-interactive mode)
+  -b, --build       Build a native package from the included source tree
+  -y, --yes         Continue if the fingerprint sensor is not detected
+  -p, --power-button Enable optional power-button/logind integration
+      --protect-enrollment  Opt in to administrator authorization for enrollment/deletion
   -v, --verbose     Show detailed command outputs
   -h, --help        Show this help message and exit
 
@@ -57,6 +63,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -y|--yes)
             ASSUME_YES=true
+            shift
+            ;;
+        -p|--power-button)
+            POWER_BUTTON_MODE=true
+            shift
+            ;;
+        --protect-enrollment)
+            PROTECT_ENROLLMENT=true
             shift
             ;;
         -v|--verbose)
@@ -88,6 +102,64 @@ run_cmd() {
     fi
 }
 
+require_cmd() {
+    local command
+    for command in "$@"; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            print_err "Required command '$command' is not installed."
+            return 1
+        fi
+    done
+}
+
+# Track each configuration path before managing it so rollback can
+# restore prior user state instead of deleting files that predated installation.
+backup_managed_file() {
+    local target="$1"
+    local backup="$BACKUP_ROOT/config-backups/${target#/}"
+    local manifest="$BACKUP_ROOT/managed-paths.txt"
+    local preexisting="$BACKUP_ROOT/preexisting-paths.txt"
+    local created="$BACKUP_ROOT/created-paths.txt"
+
+    mkdir -p "$BACKUP_ROOT"
+    if grep -Fqx -- "$target" "$manifest" 2>/dev/null; then
+        if grep -Fqx -- "$target" "$preexisting" 2>/dev/null &&
+           [[ ! -e "$backup" && ! -L "$backup" ]]; then
+            print_err "Original backup for $target is missing; refusing to overwrite it."
+            return 1
+        fi
+        return 0
+    fi
+    if [[ -e "$backup" || -L "$backup" ]]; then
+        print_err "Found an unmanaged backup for $target at $backup; inspect before reinstalling."
+        return 1
+    fi
+    if [[ -e "$target" || -L "$target" ]]; then
+        mkdir -p "$(dirname "$backup")"
+        cp -a -- "$target" "$backup"
+        printf '%s\n' "$target" >> "$preexisting"
+    else
+        printf '%s\n' "$target" >> "$created"
+    fi
+    printf '%s\n' "$target" >> "$manifest"
+}
+
+save_wake_service_state() {
+    local state="$BACKUP_ROOT/fpc1022-wake-service.state"
+    [[ -f "$state" ]] && return 0
+    mkdir -p "$BACKUP_ROOT"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled --quiet fpc1022-wake.service; then
+        printf 'enabled\n' >> "$state"
+    else
+        printf 'disabled\n' >> "$state"
+    fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet fpc1022-wake.service; then
+        printf 'active\n' >> "$state"
+    else
+        printf 'inactive\n' >> "$state"
+    fi
+}
+
 check_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         print_err "This installer must be run as root. Please run: sudo $0"
@@ -108,6 +180,7 @@ detect_distro() {
 
 check_sensor() {
     if lsusb -d 10a5:9200 >/dev/null 2>&1; then
+        SENSOR_DETECTED=true
         print_ok "Detected FPC1022 fingerprint sensor (10a5:9200)"
     else
         print_warn "Sensor '10a5:9200' not found in lsusb. Ensure it is enabled in BIOS/UEFI."
@@ -245,11 +318,7 @@ install_debian() {
         install_from_source "debian"
     fi
 
-    # Enable PAM auth
-    if command -v pam-auth-update >/dev/null 2>&1; then
-        run_cmd pam-auth-update --enable fingerprint
-    fi
-
+    # Fingerprint PAM is deliberately a manual, post-test choice for the user.
     print_ok "Installed FPC1022 driver"
     print_ok "Installed through APT; use fpc1022-doctor after system updates"
 }
@@ -276,14 +345,53 @@ install_arch() {
     print_ok "Installed through Pacman; use fpc1022-doctor after system updates"
 }
 
+detect_libdir() {
+    local family="$1" multiarch=""
+    case "$family" in
+        debian)
+            if command -v dpkg-architecture >/dev/null 2>&1; then
+                multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
+                multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
+            fi
+            if [[ -z "$multiarch" ]]; then
+                local candidate
+                for candidate in /usr/lib/*-linux-gnu; do
+                    [[ -d "$candidate" ]] || continue
+                    if [[ -e "$candidate/libfprint-2.so.2" || -f "$candidate/libfprint-2.so.2.0.0" ]]; then
+                        multiarch="${candidate#/usr/lib/}"
+                        break
+                    fi
+                done
+            fi
+            if [[ -n "$multiarch" && -d "/usr/lib/$multiarch" ]]; then
+                printf '/usr/lib/%s\n' "$multiarch"
+            else
+                printf '/usr/lib\n'
+            fi
+            ;;
+        fedora|suse)
+            [[ ! -d /usr/lib64 ]] || printf '/usr/lib64\n'
+            [[ -d /usr/lib64 ]] || printf '/usr/lib\n'
+            ;;
+        arch)
+            printf '/usr/lib\n'
+            ;;
+        *)
+            if [[ -d /usr/lib64 ]]; then printf '/usr/lib64\n'; else printf '/usr/lib\n'; fi
+            ;;
+    esac
+}
+
 # ------------------------------------------------------------------------------
 # Universal Driver Source Build (Fedora, Debian, Arch, openSUSE, Generic)
 # ------------------------------------------------------------------------------
 install_from_source() {
     local family="$1"
     local src_dir="$SCRIPT_DIR/src/libfprint"
-    local lib_dir="/usr/lib"
-    [[ -d /usr/lib64 ]] && lib_dir="/usr/lib64"
+    local lib_dir
+    lib_dir="$(detect_libdir "$family")"
 
     if [[ ! -d "$src_dir" ]]; then
         print_err "Source tree not found at $src_dir"
@@ -324,26 +432,56 @@ install_from_source() {
     esac
 
     # Isolate backup if stock lib exists
-    local backup_dir="/usr/local/share/fpc1022-backup"
+    local backup_dir="$BACKUP_ROOT"
     local target_lib="${lib_dir}/libfprint-2.so.2.0.0"
-    if [[ -f "$target_lib" && ! -f "$backup_dir/libfprint-2.so.2.0.0.stock-backup" ]]; then
-        mkdir -p "$backup_dir"
-        cp -p "$target_lib" "$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+    if [[ ! -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        print_err "No stock libfprint library or rollback backup found at $target_lib."
+        return 1
     fi
-    rm -f "${lib_dir}/"*stock-backup*
+    if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
+        mkdir -p "$backup_dir"
+        if ! cp -p -- "$target_lib" "$backup_lib"; then
+            print_err "Could not back up the stock libfprint library."
+            return 1
+        fi
+    fi
 
     local build_tmp
     build_tmp="$(mktemp -d /tmp/fpc1022_build.XXXXXX)"
     cp -r "$src_dir" "$build_tmp/src"
 
-    (
+    if ! (
         cd "$build_tmp/src"
-        meson setup build --prefix=/usr --libdir="$lib_dir" -Ddrivers=all -Ddoc=false \
+        meson setup build --prefix=/usr --libdir="${lib_dir#/usr/}" -Ddrivers=all -Ddoc=false \
             -Dintrospection=false -Dinstalled-tests=false -Dudev_hwdb=enabled
         ninja -C build
-        ninja -C build install
-    )
-    rm -rf "$build_tmp"
+        DESTDIR="$build_tmp/stage" ninja -C build install
+    ); then
+        rm -rf -- "$build_tmp"
+        print_err "Source build failed; the installed library was left unchanged."
+        return 1
+    fi
+
+    local staged_lib="$build_tmp/stage$target_lib"
+    local deploy_tmp
+    if [[ ! -f "$staged_lib" ]]; then
+        rm -rf -- "$build_tmp"
+        print_err "Staged build did not produce the expected runtime library: $staged_lib"
+        return 1
+    fi
+    deploy_tmp="$(mktemp "${target_lib}.fpc1022.XXXXXX")" || {
+        rm -rf -- "$build_tmp"
+        print_err "Could not create a temporary file beside $target_lib."
+        return 1
+    }
+    if ! cp -p -- "$staged_lib" "$deploy_tmp" || ! mv -f -- "$deploy_tmp" "$target_lib"; then
+        rm -f -- "$deploy_tmp"
+        rm -rf -- "$build_tmp"
+        print_err "Could not atomically deploy the runtime library; rollback backup remains available."
+        return 1
+    fi
+    rm -rf -- "$build_tmp"
 
     if command -v chcon >/dev/null 2>&1; then
         run_cmd chcon -t lib_t "${lib_dir}/libfprint-2.so"*
@@ -359,12 +497,26 @@ install_from_source() {
 # ------------------------------------------------------------------------------
 # Power Button Hardware Initializer & Policy Setup
 # ------------------------------------------------------------------------------
+install_driver_doctor() {
+    local doctor_source="$SCRIPT_DIR/tools/fpc1022-doctor"
+    local doctor_target="/usr/local/bin/fpc1022-doctor"
+    if [[ -f "$doctor_source" ]]; then
+        backup_managed_file "$doctor_target"
+        install -m 0755 "$doctor_source" "$doctor_target"
+        print_ok "Installed read-only post-update diagnostic"
+    else
+        print_warn "fpc1022-doctor source is missing; post-update checks will be unavailable."
+    fi
+}
+
 configure_power_button() {
     # 1. logind policy: Instant response & honor desktop inhibitors
     local logind_dir="/etc/systemd/logind.conf.d"
     local power_conf="$SCRIPT_DIR/configs/10-power-button.conf"
     if [[ -f "$power_conf" ]]; then
         mkdir -p "$logind_dir"
+        backup_managed_file "$logind_dir/10-power-button.conf"
+        save_wake_service_state
         cp -p "$power_conf" "$logind_dir/10-power-button.conf"
         if command -v systemctl >/dev/null 2>&1; then
             systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
@@ -378,6 +530,8 @@ configure_power_button() {
     # 3. Clean up legacy dconf locks so desktop power action remains user-configurable
     local dconf_dir="/etc/dconf/db/local.d"
     if [[ -f "$dconf_dir/01-power-button" || -f "$dconf_dir/locks/01-power-button" ]]; then
+        [[ ! -e "$dconf_dir/01-power-button" ]] || backup_managed_file "$dconf_dir/01-power-button"
+        [[ ! -e "$dconf_dir/locks/01-power-button" ]] || backup_managed_file "$dconf_dir/locks/01-power-button"
         rm -f "$dconf_dir/01-power-button" "$dconf_dir/locks/01-power-button"
         if command -v dconf >/dev/null 2>&1; then
             run_cmd dconf update
@@ -390,12 +544,13 @@ configure_power_button() {
     local wake_c="$SCRIPT_DIR/tools/fpc1022-wake.c"
     local wake_ok=false
 
+    backup_managed_file "$wake_bin"
+
     if command -v gcc >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 && \
         pkg-config --exists libusb-1.0 && [[ -f "$wake_c" ]]; then
         if gcc -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=3 \
             -fPIE -pie -Wl,-z,relro,-z,now "$wake_c" \
             $(pkg-config --cflags --libs libusb-1.0) -o "$wake_bin"; then
-            install -m 0755 "$SCRIPT_DIR/tools/fpc1022-doctor" /usr/local/bin/fpc1022-doctor
             wake_ok=true
         fi
     fi
@@ -403,12 +558,14 @@ configure_power_button() {
     if [[ "$wake_ok" == "true" ]]; then
         # udev rule
         if [[ -f "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" ]]; then
+            backup_managed_file /etc/udev/rules.d/99-fpc1022-wake.rules
             cp -p "$SCRIPT_DIR/configs/99-fpc1022-wake.rules" /etc/udev/rules.d/99-fpc1022-wake.rules
             chmod 644 /etc/udev/rules.d/99-fpc1022-wake.rules
         fi
 
         # systemd boot service
         if [[ -f "$SCRIPT_DIR/configs/fpc1022-wake.service" ]]; then
+            backup_managed_file /etc/systemd/system/fpc1022-wake.service
             cp -p "$SCRIPT_DIR/configs/fpc1022-wake.service" /etc/systemd/system/fpc1022-wake.service
             chmod 644 /etc/systemd/system/fpc1022-wake.service
             if command -v systemctl >/dev/null 2>&1; then
@@ -419,6 +576,7 @@ configure_power_button() {
 
         # resume sleep hook
         if [[ -d /usr/lib/systemd/system-sleep && -f "$SCRIPT_DIR/configs/fpc1022-sleep-wake" ]]; then
+            backup_managed_file /usr/lib/systemd/system-sleep/fpc1022-wake
             cp -p "$SCRIPT_DIR/configs/fpc1022-sleep-wake" /usr/lib/systemd/system-sleep/fpc1022-wake
             chmod 755 /usr/lib/systemd/system-sleep/fpc1022-wake
         fi
@@ -439,6 +597,7 @@ configure_security() {
     local polkit_rule="$SCRIPT_DIR/configs/50-fprintd-auth.rules"
     local polkit_dir="/etc/polkit-1/rules.d"
     if [[ -d "$polkit_dir" && -f "$polkit_rule" ]]; then
+        backup_managed_file "$polkit_dir/50-fprintd-auth.rules"
         cp -p "$polkit_rule" "$polkit_dir/50-fprintd-auth.rules"
         chmod 644 "$polkit_dir/50-fprintd-auth.rules"
         print_ok "Enabled PolicyKit rule (password required to delete/enroll prints)"
@@ -454,16 +613,8 @@ finalize_installation() {
     run_cmd systemctl restart fprintd.service
     sleep 1
 
-    # Fedora authselect fingerprint enable
-    if command -v authselect >/dev/null 2>&1; then
-        if authselect current >/dev/null 2>&1; then
-            if ! authselect current | grep -q "with-fingerprint"; then
-                run_cmd authselect enable-feature with-fingerprint
-                run_cmd authselect apply-changes
-                print_ok "Enabled fingerprint PAM feature in authselect"
-            fi
-        fi
-    fi
+    # PAM is intentionally not changed automatically: test enrollment and
+    # verification first, then configure the distribution's authentication tool.
     if [[ -x /usr/local/bin/fpc1022-doctor ]]; then
         /usr/local/bin/fpc1022-doctor --record-install
     fi
@@ -510,11 +661,25 @@ main() {
             ;;
     esac
 
-    print_step "3/5" "Setting up power button handling..."
-    configure_power_button
+    install_driver_doctor
 
-    print_step "4/5" "Applying security policies..."
-    configure_security
+    print_step "3/5" "Optional power-button integration..."
+    if [[ "$SENSOR_DETECTED" == "true" && "$POWER_BUTTON_MODE" == "true" ]]; then
+        configure_power_button
+    elif [[ "$SENSOR_DETECTED" != "true" ]]; then
+        print_warn "Sensor not detected; skipping power-button and wake-service changes."
+    else
+        print_ok "Skipped optional power-button integration (use --power-button to enable)."
+    fi
+
+    print_step "4/5" "Optional enrollment policy..."
+    if [[ "$SENSOR_DETECTED" == "true" && "$PROTECT_ENROLLMENT" == "true" ]]; then
+        configure_security
+    elif [[ "$PROTECT_ENROLLMENT" == "true" ]]; then
+        print_warn "Sensor not detected; skipping the system-wide fprintd policy."
+    else
+        print_ok "Skipped optional enrollment policy (use --protect-enrollment to enable)."
+    fi
 
     print_step "5/5" "Finalizing system services..."
     finalize_installation
