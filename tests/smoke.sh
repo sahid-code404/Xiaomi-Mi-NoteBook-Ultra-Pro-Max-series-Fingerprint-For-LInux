@@ -26,6 +26,9 @@ grep -q 'preexisting-paths.txt' install.sh || fail "installer does not distingui
 grep -q 'created-paths.txt' install.sh || fail "installer does not track newly created paths"
 grep -q 'preexisting-paths.txt' uninstall.sh || fail "uninstaller does not preserve files with missing backups"
 grep -q 'restore_managed_paths' uninstall.sh || fail "uninstaller no longer restores managed files"
+grep -q 'restore_file_atomically' uninstall.sh || fail "uninstaller no longer restores the Fedora library atomically"
+grep -q 'Run the DNF orphan cleanup shown above?' uninstall.sh || fail "optional orphan cleanup is missing an explicit confirmation"
+grep -q 'Run the APT orphan cleanup shown above?' uninstall.sh || fail "optional APT cleanup is missing an explicit confirmation"
 grep -q 'SENSOR_DETECTED=true' install.sh || fail "sensor detection does not set the safety gate"
 
 if grep -q 'usermod -a -G input' install.sh; then
