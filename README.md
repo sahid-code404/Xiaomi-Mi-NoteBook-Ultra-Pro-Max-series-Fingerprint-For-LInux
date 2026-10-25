@@ -1,17 +1,52 @@
-# Xiaomi Fingerprint & Power Button Driver for Linux
+# Xiaomi FPC1022 Fingerprint Driver for Linux
 
-[![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)](#supported-hardware)
-[![USB ID](https://img.shields.io/badge/USB%20ID-10a5%3A9200-blue?logo=usb)](#supported-hardware)
-[![Sensor](https://img.shields.io/badge/Sensor-FPC1022-brightgreen)](#how-it-works)
-[![License](https://img.shields.io/badge/License-LGPL--2.1-blueviolet)](LICENSE)
+[![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](#supported-hardware)
+[![USB ID](https://img.shields.io/badge/USB-10a5%3A9200-blue)](#supported-hardware)
+[![License](https://img.shields.io/badge/license-LGPL--2.1--or--later-blueviolet)](LICENSE)
+[![Quality checks](https://github.com/sahid-code404/xiaomi-fprint-driver/actions/workflows/quality.yml/badge.svg)](https://github.com/sahid-code404/xiaomi-fprint-driver/actions/workflows/quality.yml)
 
-Automated driver and power button fix for the **FPC1022** (`10a5:9200`) fingerprint reader on **Xiaomi Mi NoteBook** and **RedmiBook** laptops.
+A community-maintained Linux integration for the FPC1022 / FPC DISUM match-on-host fingerprint sensor identified as USB **10a5:9200**, with an optional Xiaomi laptop power-button initialization helper.
 
----
+> **Status: experimental.** Hardware support and installation have not been validated across every laptop, firmware revision, distribution, or desktop environment. Review scripts before running them as root. Do not enable fingerprint login until enrollment and repeated verification work reliably on your machine.
 
-## Quick Install
+## Features
 
-Open your terminal and run:
+- Adds an FPC1022 driver to the vendored `libfprint` source tree.
+- Uses the sensor's TLS-PSK transport and host-side SIGFM/SIFT image matching.
+- Provides a distro-aware installer with a source-build option.
+- Offers optional power-button initialization for machines where the sensor is detected.
+- Includes an uninstaller and backups for files managed by this installer.
+- Leaves PAM/fingerprint login configuration opt-in and does not add users to the broad `input` group.
+
+## Supported hardware
+
+The supported hardware identifier is:
+
+| Property | Value |
+| --- | --- |
+| USB vendor:product | `10a5:9200` |
+| Driver family | FPC1022 / FPC DISUM match-on-host |
+| Image size reported by the driver | 112 × 88 pixels before scaling |
+| Prebuilt package architecture | x86-64 where a matching package is provided |
+
+Laptop marketing names alone are not enough to establish compatibility. Before installing, check the actual sensor:
+
+```bash
+lsusb -d 10a5:9200
+```
+
+If no device is returned, do not assume that another fingerprint sensor will work with this driver. The installer asks before continuing when the sensor is absent, and it skips the power-button modifications when the device has not been detected.
+
+## Install
+
+Read the installer before granting it root privileges:
+
+```bash
+less install.sh
+less uninstall.sh
+```
+
+Then install from a local clone:
 
 ```bash
 git clone https://github.com/sahid-code404/xiaomi-fprint-driver.git
@@ -19,144 +54,132 @@ cd xiaomi-fprint-driver
 sudo ./install.sh
 ```
 
-**Supported Distributions:** Fedora, Ubuntu, Debian, Arch Linux, openSUSE, Pop!_OS, and Linux Mint.
+Available options:
 
-The installer automatically deploys the patched `libfprint` driver, configures instant power button response, and locks the package so routine system updates won't overwrite it.
+| Option | Meaning |
+| --- | --- |
+| `--build` | Build the vendored source instead of using an available prebuilt package/library |
+| `--yes` | Skip the prompt when the sensor is not detected |
+| `--verbose` | Show command output for troubleshooting |
+| `--help` | Show options and exit |
 
----
-
-## How to Enroll & Verify
-
-### 1. Register Fingerprint
-```bash
-fprintd-enroll
-```
-*(Tip: Lift and place your finger at slightly varying angles across the 5 prompts to capture edges and center).*
-
-To enroll a specific finger:
-```bash
-fprintd-enroll -f right-index-finger
-```
-
-### 2. Test Verification
-```bash
-fprintd-verify
-```
-
-### 3. Desktop Settings (GUI)
-You can also enroll directly from your desktop settings:
-- **GNOME**: Settings → Users → Fingerprint Login
-- **KDE Plasma**: System Settings → Users → Fingerprint
-
-### 4. Enable for `sudo` & Login
-- **Fedora**: `sudo authselect enable-feature with-fingerprint && sudo authselect apply-changes`
-- **Ubuntu / Debian**: `sudo pam-auth-update` (enable Fingerprint authentication)
-- **Arch Linux**: Add `auth sufficient pam_fprintd.so` to `/etc/pam.d/system-auth` and `/etc/pam.d/sudo`
-
----
-
-## Supported Hardware
-
-| Laptop Model | Display | USB ID | Status |
-| :--- | :--- | :--- | :--- |
-| **Xiaomi Mi NoteBook Ultra** | 15.6" 3.2K 90Hz | `10a5:9200` | Working |
-| **Xiaomi Mi NoteBook Pro** | 14" / 15.6" 2.5K | `10a5:9200` | Working |
-| **RedmiBook Pro / Max Series** | Various | `10a5:9200` | Working |
-
-Check your sensor with:
-```bash
-lsusb -d 10a5:9200
-```
-
----
-
-## Power Button Behavior
-
-On Xiaomi laptops, the physical power switch passes through the FPC1022 microcontroller to the motherboard ACPI line:
-
-- **Instant Response**: Removes systemd's default 30-second post-resume ignore delay (`HoldoffTimeoutSec=0`) and ensures the power switch line wakes immediately on boot and resume.
-- **Your Choice of Action**: Follows your preference set in **Settings → Power** (Nothing, Suspend, Power Off, or Interactive Menu) without forced overrides. When no user session is active (e.g. lock screen or TTY), it defaults to clean power off.
-
----
-
-## How It Works (Architecture)
-
-```mermaid
-flowchart TD
-    subgraph HW["Hardware"]
-        S["FPC1022 Sensor\n(USB 10a5:9200)"]
-        PB["Integrated Power Switch"]
-    end
-
-    subgraph DRV["Driver Layer"]
-        W["fpc1022-wake\n(MCU S0 Initializer)"]
-        L["Patched libfprint\n(SIGFM SIFT Matcher)"]
-    end
-
-    subgraph SYS["System Services"]
-        LOG["systemd-logind\n(Instant Response)"]
-        FPD["fprintd Service\n(Biometric D-Bus)"]
-        POL["Polkit Policy\n(Password on Delete/Enroll)"]
-    end
-
-    subgraph UI["Desktop & Auth"]
-        DESK["GNOME / KDE Settings"]
-        PAM["PAM (sudo / Login)"]
-    end
-
-    S -->|TLS-PSK Bulk USB| L
-    PB -->|S0 Working State| W
-    W --> LOG
-    LOG --> DESK
-    L --> FPD
-    POL --> FPD
-    FPD --> DESK
-    FPD --> PAM
-```
-
-- **TLS-PSK Encryption**: The FPC1022 is a match-on-host sensor. The driver establishes a TLS-PSK (Pre-Shared Key) encrypted USB channel to protect raw biometric image frames during transfer.
-- **SIGFM Matcher (OpenCV SIFT)**: Standard minutiae matching (Bozorth3) fails on compact $112 \times 88$ px sensors. SIGFM uses scale-invariant keypoint extraction and nearest-neighbor distance matching to achieve high verification accuracy with minimal false rejections.
-
----
-
-## Uninstallation
-
-To restore official distribution drivers and remove custom configs:
-
-```bash
-sudo ./uninstall.sh
-```
-
-- Restores original stock `libfprint` without removing system packages.
-- Removes power button rules and Polkit policies.
-- Cleans up unneeded orphan dependencies via `autoremove`.
-
----
-
-## Build from Source
-
-To compile locally instead of using pre-built binaries:
+For example, to build from source:
 
 ```bash
 sudo ./install.sh --build
 ```
 
----
+The source build needs the development dependencies for GLib/GIO, libgusb, OpenSSL, OpenCV, Meson, Ninja, a C/C++ toolchain, and the distribution-specific integration libraries. The installer attempts to install known prerequisites on supported package-manager families.
 
-## Troubleshooting
+### Updates and package management
 
-- **Sensor not showing in `lsusb`**: Ensure the fingerprint reader is enabled in your laptop BIOS/UEFI.
-- **`Device was already claimed`**: Run `sudo systemctl restart fprintd.service`.
-- **View service logs**: `journalctl -u fprintd.service -n 50 --no-pager`.
+This installer intentionally **does not lock or exclude system packages**. That avoids silently blocking security and bug-fix updates. However, a distribution update can replace a manually installed library or cause the patched driver to stop loading. Re-test the reader after a `libfprint` or distribution upgrade and rebuild/reinstall this project if necessary.
 
----
+The long-term preferred distribution model is a native, versioned package with explicit dependencies and a clean upgrade path rather than replacing a package-owned shared library in place.
 
-## Credits & License
+## Test before enabling login
 
-- **Sergey Subbotin (`ssubbotin`)**: Core FPC1022 driver and SIGFM matcher.
-- **Omkar Chandorkar (`gotenksIN`)**: TLS framing and CI packaging.
-- **Jason Huang**: Initial sensor reverse engineering.
-- **Natalie Klestrup Röijezon & Tooniis**: SIFT biometric research.
-- **Sahidul Haque ([@sahid-code404](https://github.com/sahid-code404))**: Power button integration, automated universal tooling, and maintenance.
+First test the driver without changing the login stack:
 
-Licensed under the [GNU Lesser General Public License v2.1](LICENSE) (LGPL-2.1).
+```bash
+systemctl restart fprintd.service
+fprintd-enroll
+fprintd-verify
+```
+
+Use the same finger repeatedly and test after reboot and suspend/resume. If enrollment or verification is intermittent, keep password authentication available and collect logs:
+
+```bash
+journalctl -u fprintd.service -b --no-pager
+lsusb -d 10a5:9200
+fprintd-list "$USER"
+```
+
+Only after successful repeated testing should you choose to enable fingerprint authentication using your distribution's documented PAM tool. This project does not enable PAM automatically.
+
+- **Fedora:** inspect `authselect current` and follow Fedora's documentation for the active profile before enabling `with-fingerprint`.
+- **Ubuntu/Debian:** use `sudo pam-auth-update` and select the fingerprint option if it is available.
+- **Arch Linux:** configure the distribution's PAM stack according to the Arch Wiki and verify password fallback before relying on fingerprint login.
+
+PAM changes can affect login and privilege escalation. Keep a tested password-based recovery path and avoid editing PAM files by hand without a backup.
+
+## Power-button integration
+
+When the fingerprint sensor is detected, the installer can configure the FPC1022 S0 initialization helper, a udev rule, a systemd unit, and a resume hook. It also installs a logind drop-in for the power-key policy.
+
+The drop-in changes power-button behavior, so review `configs/10-power-button.conf` before installing. This project backs up managed files that already exist, then restores those backups during uninstallation. Older releases did not record all pre-existing state; see the rollback notes below when removing an older installation.
+
+No user is added to the `input` group by the installer. USB access is scoped to the sensor's vendor/product identifier by the supplied udev rule.
+
+## Uninstall and rollback
+
+Run the default rollback:
+
+```bash
+sudo ./uninstall.sh
+```
+
+The normal path does not run package-manager orphan cleanup. If you explicitly want to review orphan cleanup, run:
+
+```bash
+sudo ./uninstall.sh --cleanup-orphans
+```
+
+The package manager will show its proposed removals; review the plan carefully. No packages are automatically removed by the default uninstall.
+
+The uninstaller restores a saved stock library when the installer created a backup, reinstalls distribution packages where supported, and restores files listed in the installer's managed-file manifest. For older installations that predate the manifest, it cannot reliably know whether PAM options, DNF exclusions, Pacman ignores, or overwritten config files existed beforehand. Review these manually rather than blindly resetting the system:
+
+```bash
+# Fedora: inspect any legacy exclusion
+grep -n 'libfprint' /etc/dnf/dnf.conf 2>/dev/null
+
+# Arch: inspect package exclusions
+grep -n 'libfprint' /etc/pacman.conf 2>/dev/null
+
+# Debian/Ubuntu: inspect package holds and active authentication profile
+apt-mark showhold
+sudo pam-auth-update
+```
+
+Do not remove an entry if you added it yourself for another reason.
+
+## Build and validate from source
+
+The bundled source is built with Meson and Ninja. A typical source build is:
+
+```bash
+cd src/libfprint
+meson setup build --prefix=/usr -Ddrivers=all -Ddoc=false -Dintrospection=false -Dinstalled-tests=false
+ninja -C build
+meson test -C build --print-errorlogs
+```
+
+The package and installer paths vary by distribution. On Debian/Ubuntu, the build uses the host multiarch library directory when it is available rather than assuming that every system stores shared libraries in `/usr/lib` or `/usr/lib64`.
+
+For developer checks:
+
+```bash
+bash -n install.sh uninstall.sh
+sh -n configs/fpc1022-sleep-wake
+./tests/smoke.sh
+```
+
+See [docs/TESTING.md](docs/TESTING.md) for the release checklist and test-report template.
+
+## Security model and limitations
+
+- The sensor communicates over a TLS-PSK channel and the driver performs host-side fingerprint matching. Protocol compatibility does not itself prove that a physical sensor is authentic.
+- Some key-derivation and sealing constants are present in the public driver source. Do not treat the HMAC check or encrypted transport as a guarantee against a determined attacker with physical access or the ability to inspect the implementation.
+- The project currently does not publish independently measured false-acceptance rate (FAR), false-rejection rate (FRR), presentation-attack/liveness performance, or a broad hardware compatibility matrix.
+- SIFT-based matching is a matching implementation, not proof of production-grade biometric security. Do not use this project as the sole protection for high-assurance systems without independent evaluation.
+- Root-level installers can affect the operating system. Review changes, keep backups, and have a recovery route before installing.
+
+Please report security issues privately to the repository maintainer rather than publishing details that could put users at risk. See [SECURITY.md](SECURITY.md).
+
+## Credits and license
+
+The driver and matcher incorporate work from Sergey Subbotin, Omkar Chandorkar, Jason Huang, and the SIGFM research contributors including Matthieu Charette, Natasha England-Elbro, and Timur Mangliev. See the source files and history for original copyright notices and attribution.
+
+The project integrates and modifies `libfprint` source licensed under **LGPL-2.1-or-later**. See [LICENSE](LICENSE) and retain applicable notices when redistributing modified source or binaries.
+
+Maintainer and integration work: [Sahidul Haque (@sahid-code404)](https://github.com/sahid-code404).
