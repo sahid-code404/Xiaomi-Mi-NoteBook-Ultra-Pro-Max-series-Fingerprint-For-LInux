@@ -189,7 +189,8 @@ install_fedora() {
     FEDORA_PKG_DIR="$SCRIPT_DIR/packages/fedora"
     DEPS_DIR="/usr/local/lib64/fprint-deps"
     TARGET_LIB="/usr/lib64/libfprint-2.so.2.0.0"
-    BACKUP_LIB="/usr/lib64/libfprint-2.so.2.0.0.stock-backup"
+    BACKUP_DIR="/usr/local/share/fpc1022-backup"
+    BACKUP_LIB="$BACKUP_DIR/libfprint-2.so.2.0.0.stock-backup"
 
     if [[ ! -f "$FEDORA_PKG_DIR/libfprint-2.so.2.0.0" ]]; then
         echo -e "${RED}[ERROR] Fedora pre-compiled binary missing at $FEDORA_PKG_DIR/libfprint-2.so.2.0.0${NC}" >&2
@@ -198,11 +199,22 @@ install_fedora() {
         return
     fi
 
+    mkdir -p "$BACKUP_DIR"
+
+    # Migrate any legacy backup out of /usr/lib64 so ldconfig never binds libfprint-2.so.2 to it
+    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
+        echo -e "${BLUE}[*] Moving stock backup out of /usr/lib64 to ${BACKUP_DIR}...${NC}"
+        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$BACKUP_LIB"
+    fi
+
     # Backup stock Fedora libfprint library if not already backed up
     if [[ -f "$TARGET_LIB" && ! -f "$BACKUP_LIB" ]]; then
         echo -e "${BLUE}[*] Backing up stock system libfprint to ${BACKUP_LIB}...${NC}"
         cp -p "$TARGET_LIB" "$BACKUP_LIB"
     fi
+
+    # Clean up any leftover backup file in /usr/lib64 to ensure ldconfig resolves to our patched driver
+    rm -f /usr/lib64/*stock-backup*
 
     # Set up OpenCV / SIGFM dependency directory
     mkdir -p "$DEPS_DIR"
@@ -334,11 +346,17 @@ install_from_source_fedora() {
 
     # Backup stock Fedora libfprint library if not already backed up
     local target_lib="/usr/lib64/libfprint-2.so.2.0.0"
-    local backup_lib="/usr/lib64/libfprint-2.so.2.0.0.stock-backup"
+    local backup_dir="/usr/local/share/fpc1022-backup"
+    local backup_lib="$backup_dir/libfprint-2.so.2.0.0.stock-backup"
+    mkdir -p "$backup_dir"
+    if [[ -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" ]]; then
+        mv -f "/usr/lib64/libfprint-2.so.2.0.0.stock-backup" "$backup_lib"
+    fi
     if [[ -f "$target_lib" && ! -f "$backup_lib" ]]; then
         echo -e "${BLUE}[*] Backing up stock system libfprint to ${backup_lib}...${NC}"
         cp -p "$target_lib" "$backup_lib"
     fi
+    rm -f /usr/lib64/*stock-backup*
 
     echo -e "${BLUE}[*] Configuring and building libfprint with fpc1022 and sigfm...${NC}"
     local build_tmp

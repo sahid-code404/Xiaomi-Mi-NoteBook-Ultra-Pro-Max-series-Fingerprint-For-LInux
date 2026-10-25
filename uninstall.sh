@@ -46,21 +46,29 @@ revert_fedora() {
     fi
 
     # Restore stock libfprint (do not remove system packages)
-    if [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
+    local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
+    if [[ -f "$backup_lib" ]]; then
         echo -e "${BLUE}[*] Restoring stock libfprint from backup...${NC}"
-        cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
+        cp -p "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
         ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
         echo -e "${GREEN}[✔] Restored /usr/lib64/libfprint-2.so.2.0.0 from stock backup.${NC}"
+    elif [[ -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup ]]; then
+        echo -e "${BLUE}[*] Restoring stock libfprint from legacy backup...${NC}"
+        cp -p /usr/lib64/libfprint-2.so.2.0.0.stock-backup /usr/lib64/libfprint-2.so.2.0.0
+        ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
+        rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
+        echo -e "${GREEN}[✔] Restored /usr/lib64/libfprint-2.so.2.0.0 from legacy backup.${NC}"
     else
         echo -e "${BLUE}[*] Reinstalling stock libfprint via DNF...${NC}"
         dnf reinstall -y libfprint 2>/dev/null || true
     fi
 
-    # Clean up custom fprint-deps directory and ld.so config
+    # Clean up custom fprint-deps directory, backup directory, and ld.so config
     echo -e "${BLUE}[*] Cleaning up /usr/local/lib64/fprint-deps and /etc/ld.so.conf.d/fprint.conf...${NC}"
     rm -f /etc/ld.so.conf.d/fprint.conf
     rm -rf /usr/local/lib64/fprint-deps
-    rm -f /usr/lib64/libfprint-2.so.2.0.0.stock-backup
+    rm -rf /usr/local/share/fpc1022-backup
+    rm -f /usr/lib64/*stock-backup*
 
     # Restore SELinux contexts
     if command -v restorecon >/dev/null 2>&1; then
