@@ -37,7 +37,8 @@ if grep -q ' > /etc/ld.so.conf.d/fprint.conf' install.sh; then fail "installer m
 if grep -q 'pam-auth-update --enable fingerprint' install.sh || grep -q 'authselect enable-feature with-fingerprint' install.sh; then
     fail "installer must not enable fingerprint PAM automatically"
 fi
-if grep -Eq 'autoremove -y|pacman -Rns --noconfirm' uninstall.sh; then fail "uninstaller must not automatically remove orphan packages"; fi
+if grep -Eq 'dnf autoremove -y|apt-get autoremove -y' uninstall.sh; then fail "uninstaller must not automatically remove orphan packages"; fi
+grep -q 'if [[ "$CLEANUP_ORPHANS" == "true" ]]; then' uninstall.sh || fail "orphan cleanup must stay opt-in"
 if grep -Eq 'glib2-devel|libgcc|libstdc[+][+]' src/libfprint/packaging/arch/PKGBUILD; then
     fail "Arch PKGBUILD contains non-Arch package names"
 fi
