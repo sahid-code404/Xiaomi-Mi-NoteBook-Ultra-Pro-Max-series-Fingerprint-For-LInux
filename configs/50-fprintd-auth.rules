@@ -1,6 +1,7 @@
 // Optional, system-wide PolicyKit hardening for fprintd.
 // When explicitly installed, requires administrator authorization for enrollment
-// and username changes. This affects all fprintd-compatible sensors, not only Xiaomi.
+// (the fprintd "enroll" action also protects deletion) and cross-user management.
+// This affects all fprintd-compatible sensors, not only Xiaomi.
 
 polkit.addRule(function(action, subject) {
     if (action.id == "net.reactivated.fprint.device.enroll" ||
