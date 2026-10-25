@@ -70,14 +70,11 @@ DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
 
 revert_fedora() {
-    # 1. Remove libfprint exclusion from dnf.conf
-    local dnf_conf="/etc/dnf/dnf.conf"
-    if [[ -f "$dnf_conf" ]]; then
-        sed -i -E 's/\blibfprint\*[ \t]*//g' "$dnf_conf"
-        sed -i -E '/^[ \t]*excludepkgs[ \t]*=[ \t]*$/d' "$dnf_conf"
-    fi
+    # Do not rewrite existing DNF configuration automatically: older
+    # installer versions did not record whether exclusions predated installation.
+    # Inspect /etc/dnf/dnf.conf manually if a legacy exclusion remains.
 
-    # 2. Restore stock libfprint (do NOT delete system packages)
+    # Restore stock libfprint (do NOT delete system packages)
     local backup_lib="/usr/local/share/fpc1022-backup/libfprint-2.so.2.0.0.stock-backup"
     if [[ -f "$backup_lib" ]]; then
         cp -p "$backup_lib" /usr/lib64/libfprint-2.so.2.0.0
@@ -105,22 +102,21 @@ revert_fedora() {
 }
 
 revert_debian() {
-    run_cmd apt-mark unhold libfprint-2-2 libfprint-fpc1022
+    # Older releases may have held these packages, but there is no state file
+    # that proves those holds were added by this project. Preserve user policy.
     run_cmd apt-get install --reinstall -y libfprint-2-2 fprintd
     run_cmd ldconfig
-    print_ok "Restored stock Debian/Ubuntu libfprint"
-    print_ok "Cleared APT package holds"
+    print_ok "Requested restoration of stock Debian/Ubuntu libfprint"
+    print_warn "Check 'apt-mark showhold' and remove only any hold created for this driver."
 }
 
 revert_arch() {
-    if [[ -f /etc/pacman.conf ]]; then
-        sed -i -E 's/\blibfprint\b[ \t]*//g' /etc/pacman.conf
-        sed -i -E '/^[ \t]*IgnorePkg[ \t]*=[ \t]*$/d' /etc/pacman.conf
-    fi
-    run_cmd pacman -S --noconfirm --needed libfprint fprintd
+    # Preserve pacman.conf because this project did not record its previous
+    # contents. Explicitly install the stock packages without editing IgnorePkg.
+    run_cmd pacman -S --needed libfprint fprintd
     run_cmd ldconfig
-    print_ok "Restored stock Arch libfprint"
-    print_ok "Cleared Pacman package locks"
+    print_ok "Requested restoration of stock Arch libfprint"
+    print_warn "Inspect /etc/pacman.conf for any legacy IgnorePkg entry for libfprint."
 }
 
 restore_managed_paths() {
@@ -277,6 +273,9 @@ main() {
         arch|manjaro|endeavouros)
             revert_arch
             ;;
+        opensuse*|sles)
+            revert_generic_source
+            ;;
         *)
             if [[ "$DISTRO_LIKE" =~ (fedora|rhel) ]]; then
                 revert_fedora
@@ -284,8 +283,10 @@ main() {
                 revert_debian
             elif [[ "$DISTRO_LIKE" =~ (arch) ]]; then
                 revert_arch
+            elif [[ "$DISTRO_LIKE" =~ (suse) ]]; then
+                revert_generic_source
             else
-                print_warn "Distribution '$DISTRO_ID': Please reinstall stock libfprint using your package manager."
+                revert_generic_source
             fi
             ;;
     esac
@@ -301,6 +302,10 @@ main() {
     if command -v systemctl >/dev/null 2>&1; then
         run_cmd systemctl daemon-reload
         run_cmd systemctl reload systemd-logind
+        if [[ -f /usr/local/share/fpc1022-backup/fpc1022-wake-service.state ]] &&
+           grep -qx 'enabled' /usr/local/share/fpc1022-backup/fpc1022-wake-service.state; then
+            run_cmd systemctl enable fpc1022-wake.service
+        fi
     fi
     run_cmd udevadm control --reload
     run_cmd udevadm trigger
@@ -310,9 +315,7 @@ main() {
     # recording its prior state, so never overwrite PAM/authselect blindly.
     print_warn "Review PAM/authselect settings manually if an older installer enabled fingerprint login."
 
-    # Reload system services
-    run_cmd udevadm control --reload
-    run_cmd udevadm trigger
+    # Restart fprintd after library restoration, if it is installed.
     run_cmd systemctl restart fprintd.service
 
     print_step "5/5" "Optional orphan-package cleanup..."
