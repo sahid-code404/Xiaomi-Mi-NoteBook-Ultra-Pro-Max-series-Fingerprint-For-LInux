@@ -285,7 +285,12 @@ install_fedora() {
 
     # Deploy atomically from the same filesystem so interruption cannot leave
     # the live library truncated. The stock copy above remains available.
-    local deploy_tmp="${target_lib}.fpc1022.$"
+    local deploy_tmp
+    deploy_tmp="$(mktemp "${target_lib}.fpc1022.XXXXXX")" || {
+        print_err "Could not create a temporary library beside $target_lib."
+        rm -f -- "$staged_driver" 2>/dev/null || true
+        return 1
+    }
     if ! cp -p -- "$staged_driver" "$deploy_tmp" ||
        ! mv -f -- "$deploy_tmp" "$target_lib"; then
         rm -f -- "$deploy_tmp" "$staged_driver"
@@ -448,7 +453,12 @@ install_from_source() {
         print_err "Staged libfprint library was not found at $staged_lib"
         return 1
     fi
-    local deploy_tmp="${target_lib}.fpc1022.$"
+    local deploy_tmp
+    deploy_tmp="$(mktemp "${target_lib}.fpc1022.XXXXXX")" || {
+        print_err "Could not create a temporary library beside $target_lib."
+        rm -f -- "$staged_driver" 2>/dev/null || true
+        return 1
+    }
     if ! cp -p -- "$staged_lib" "$deploy_tmp" ||
        ! mv -f -- "$deploy_tmp" "$target_lib"; then
         rm -f -- "$deploy_tmp"
