@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
-bash -n install.sh uninstall.sh tests/smoke.sh tools/fpc1022-doctor
+for script in install.sh uninstall.sh tests/smoke.sh tools/fpc1022-doctor; do bash -n "$script" || exit $?; done
 sh -n configs/fpc1022-sleep-wake
 
 install_help="$(bash install.sh --help)"
@@ -38,7 +38,7 @@ if grep -q 'pam-auth-update --enable fingerprint' install.sh || grep -q 'authsel
     fail "installer must not enable fingerprint PAM automatically"
 fi
 if grep -Eq 'autoremove -y|pacman -Rns --noconfirm' uninstall.sh; then fail "uninstaller must not automatically remove orphan packages"; fi
-if grep -Eq 'glib2-devel|'"'"'libgcc|'"'"'libstdc[+][+]' src/libfprint/packaging/arch/PKGBUILD; then
+if grep -Eq 'glib2-devel|libgcc|libstdc[+][+]' src/libfprint/packaging/arch/PKGBUILD; then
     fail "Arch PKGBUILD contains non-Arch package names"
 fi
 grep -Eq '#commit=[0-9a-f]{40}' src/libfprint/packaging/arch/PKGBUILD || fail "Arch source must be pinned to an exact commit"
