@@ -205,7 +205,9 @@ install_fedora() {
         print_warn "Removed the legacy global loader path from an earlier installation."
     fi
 
-    if [[ "$BUILD_MODE" == "true" ]] || [[ ! -f "$fedora_pkg/libfprint-2.so.2.0.0" ]]; then
+    if [[ "$BUILD_MODE" == "true" ]] ||
+       [[ ! -f "$fedora_pkg/libfprint-2.so.2.0.0" ]] ||
+       [[ "$(uname -m)" != "x86_64" ]]; then
         install_from_source "fedora"
         return
     fi
