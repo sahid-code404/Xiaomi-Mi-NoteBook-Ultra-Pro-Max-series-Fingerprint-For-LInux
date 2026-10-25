@@ -15,6 +15,8 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 print_banner() {
     cat << "EOF"
 ====================================================================
@@ -73,6 +75,25 @@ fi
 . /etc/os-release
 DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
+
+manifest_has_path() {
+    local target="$1"
+    local manifest="/usr/local/share/fpc1022-backup/managed-paths.txt"
+    [[ -f "$manifest" ]] && grep -Fqx -- "$target" "$manifest"
+}
+
+is_managed_or_matching() {
+    local target="$1"
+    local template="${2:-}"
+    if manifest_has_path "$target"; then
+        return 0
+    fi
+    if [[ -n "$template" && -f "$SCRIPT_DIR/$template" && -f "$target" ]] &&
+       cmp -s -- "$SCRIPT_DIR/$template" "$target"; then
+        return 0
+    fi
+    return 1
+}
 
 revert_fedora() {
     # Do not rewrite existing DNF configuration automatically: older
@@ -205,54 +226,83 @@ revert_generic_source() {
 }
 
 revert_power_button() {
-    # 1. logind config
-    if [[ -f /etc/systemd/logind.conf.d/10-power-button.conf ]]; then
-        rm -f /etc/systemd/logind.conf.d/10-power-button.conf
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl reload systemd-logind 2>/dev/null || systemctl kill -s HUP systemd-logind 2>/dev/null || true
+    local logind_conf="/etc/systemd/logind.conf.d/10-power-button.conf"
+    local dconf_override="/etc/dconf/db/local.d/01-power-button"
+    local dconf_lock="/etc/dconf/db/local.d/locks/01-power-button"
+    local wake_service="/etc/systemd/system/fpc1022-wake.service"
+    local udev_rule="/etc/udev/rules.d/99-fpc1022-wake.rules"
+    local sleep_hook="/usr/lib/systemd/system-sleep/fpc1022-wake"
+    local wake_bin="/usr/local/bin/fpc1022-wake"
+
+    if [[ -f "$logind_conf" ]]; then
+        if is_managed_or_matching "$logind_conf" "configs/10-power-button.conf"; then
+            rm -f -- "$logind_conf"
+            run_cmd systemctl reload systemd-logind
+            print_ok "Removed installer power-button policy"
+        else
+            print_warn "Preserved unrecognized logind config: $logind_conf"
         fi
-        print_ok "Removed logind power button policy"
     fi
 
-    # 2. dconf overrides
-    if [[ -f /etc/dconf/db/local.d/01-power-button ]]; then
-        rm -f /etc/dconf/db/local.d/01-power-button
-        rm -f /etc/dconf/db/local.d/locks/01-power-button
-        if command -v dconf >/dev/null 2>&1; then
-            run_cmd dconf update
-        fi
-        print_ok "Removed desktop power button overrides"
+    # These legacy dconf paths were removed by older installers. Only remove
+    # them automatically when a current manifest proves this installer touched them.
+    if manifest_has_path "$dconf_override"; then
+        rm -f -- "$dconf_override"
+    fi
+    if manifest_has_path "$dconf_lock"; then
+        rm -f -- "$dconf_lock"
     fi
 
-    # 3. fpc1022-wake systemd service
-    if [[ -f /etc/systemd/system/fpc1022-wake.service ]]; then
-        if command -v systemctl >/dev/null 2>&1; then
+    if [[ -f "$wake_service" ]]; then
+        if is_managed_or_matching "$wake_service" "configs/fpc1022-wake.service"; then
             run_cmd systemctl stop fpc1022-wake.service
             run_cmd systemctl disable fpc1022-wake.service
-        fi
-        rm -f /etc/systemd/system/fpc1022-wake.service
-        if command -v systemctl >/dev/null 2>&1; then
+            rm -f -- "$wake_service"
             run_cmd systemctl daemon-reload
+            print_ok "Removed installer wake service"
+        else
+            print_warn "Preserved unrecognized systemd unit: $wake_service"
         fi
-        print_ok "Disabled and removed fpc1022-wake service"
     fi
 
-    # 4. udev rule
-    if [[ -f /etc/udev/rules.d/99-fpc1022-wake.rules ]]; then
-        rm -f /etc/udev/rules.d/99-fpc1022-wake.rules
-        print_ok "Removed udev rule"
+    if [[ -f "$udev_rule" ]]; then
+        if is_managed_or_matching "$udev_rule" "configs/99-fpc1022-wake.rules"; then
+            rm -f -- "$udev_rule"
+            print_ok "Removed installer udev rule"
+        else
+            print_warn "Preserved unrecognized udev rule: $udev_rule"
+        fi
     fi
 
-    # 5. sleep hook & binary
-    rm -f /usr/lib/systemd/system-sleep/fpc1022-wake
-    rm -f /usr/local/bin/fpc1022-wake
-    print_ok "Removed hardware wake binary and sleep hooks"
+    if [[ -f "$sleep_hook" ]]; then
+        if is_managed_or_matching "$sleep_hook" "configs/fpc1022-sleep-wake"; then
+            rm -f -- "$sleep_hook"
+            print_ok "Removed installer resume hook"
+        else
+            print_warn "Preserved unrecognized sleep hook: $sleep_hook"
+        fi
+    fi
+
+    if [[ -f "$wake_bin" ]]; then
+        if manifest_has_path "$wake_bin" ||
+           (command -v strings >/dev/null 2>&1 && strings "$wake_bin" | grep -q 'fpc1022-wake:'); then
+            rm -f -- "$wake_bin"
+            print_ok "Removed installer wake helper"
+        else
+            print_warn "Preserved unrecognized binary: $wake_bin"
+        fi
+    fi
 }
 
 revert_security() {
-    if [[ -f /etc/polkit-1/rules.d/50-fprintd-auth.rules ]]; then
-        rm -f /etc/polkit-1/rules.d/50-fprintd-auth.rules
-        print_ok "Removed Polkit security rule"
+    local rule="/etc/polkit-1/rules.d/50-fprintd-auth.rules"
+    if [[ -f "$rule" ]]; then
+        if is_managed_or_matching "$rule" "configs/50-fprintd-auth.rules"; then
+            rm -f -- "$rule"
+            print_ok "Removed installer Polkit rule"
+        else
+            print_warn "Preserved unrecognized Polkit rule: $rule"
+        fi
     fi
 }
 
