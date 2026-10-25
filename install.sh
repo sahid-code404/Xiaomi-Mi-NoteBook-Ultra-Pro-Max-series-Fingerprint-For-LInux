@@ -366,7 +366,7 @@ install_fedora() {
         [[ ! -f /usr/lib64/libcrypto.so.3 ]] || ln -sf /usr/lib64/libcrypto.so.3 libcrypto.so
         [[ ! -f /usr/lib64/libssl.so.3 ]] || ln -sf /usr/lib64/libssl.so.3 libssl.so
 
-        local -a bundled_libs=()
+        bundled_libs=()
         mapfile -d '' -t bundled_libs < <(find . -maxdepth 1 -type f -name '*.so*' -print0)
         for dep in "${bundled_libs[@]}"; do
             patchelf --set-rpath '$ORIGIN' "$dep" || exit 1
