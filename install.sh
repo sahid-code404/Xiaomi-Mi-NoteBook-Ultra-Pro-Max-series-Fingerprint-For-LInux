@@ -206,6 +206,13 @@ install_fedora() {
         cp -p "$target_lib" "$backup_lib"
     fi
 
+    # Preserve a directory that may have been created by an earlier local setup.
+    local deps_backup="$backup_dir/previous-fprint-deps"
+    if [[ -d "$deps_dir" && ! -d "$deps_backup" ]]; then
+        mkdir -p "$backup_dir"
+        cp -a -- "$deps_dir" "$deps_backup"
+    fi
+
     # Deploy bundled runtime dependencies
     mkdir -p "$deps_dir"
     cp -p "$fedora_pkg/fprint-deps/"*.so.* "$deps_dir/"
@@ -225,8 +232,13 @@ install_fedora() {
     backup_managed_file /etc/ld.so.conf.d/fprint.conf
     echo "$deps_dir" > /etc/ld.so.conf.d/fprint.conf
 
-    # Deploy patched driver and enforce symlink
+    # Deploy patched driver. Preserve an existing SONAME link before enforcing
+    # the standard relative link; if no link exists, rollback keeps the newly
+    # created standard link after restoring the stock library.
     cp -p "$fedora_pkg/libfprint-2.so.2.0.0" "$target_lib"
+    if [[ -e /usr/lib64/libfprint-2.so.2 || -L /usr/lib64/libfprint-2.so.2 ]]; then
+        backup_managed_file /usr/lib64/libfprint-2.so.2
+    fi
     ln -sf libfprint-2.so.2.0.0 /usr/lib64/libfprint-2.so.2
 
     # SELinux contexts
