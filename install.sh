@@ -23,6 +23,7 @@ BUILD_MODE=false
 ASSUME_YES=false
 VERBOSE=false
 SENSOR_DETECTED=false
+POWER_BUTTON_MODE=false
 
 print_banner() {
     cat << "EOF"
@@ -38,7 +39,8 @@ Usage: sudo ./install.sh [OPTIONS]
 
 Options:
   -b, --build       Compile driver from source instead of using pre-built binaries
-  -y, --yes         Automatic yes to prompts (non-interactive mode)
+  -y, --yes         Continue if the fingerprint sensor is not detected
+  -p, --power-button Enable optional power-button/logind integration
   -v, --verbose     Show detailed command outputs
   -h, --help        Show this help message and exit
 
@@ -59,6 +61,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -y|--yes)
             ASSUME_YES=true
+            shift
+            ;;
+        -p|--power-button)
+            POWER_BUTTON_MODE=true
             shift
             ;;
         -v|--verbose)
@@ -526,10 +532,12 @@ main() {
     esac
 
     print_step "3/5" "Setting up power button handling..."
-    if [[ "$SENSOR_DETECTED" == "true" ]]; then
+    if [[ "$SENSOR_DETECTED" == "true" && "$POWER_BUTTON_MODE" == "true" ]]; then
         configure_power_button
-    else
+    elif [[ "$SENSOR_DETECTED" != "true" ]]; then
         print_warn "Fingerprint sensor not detected; skipping power-button and wake-service changes."
+    else
+        print_ok "Optional power-button integration skipped. Use --power-button to enable it."
     fi
 
     print_step "4/5" "Applying security policies..."
