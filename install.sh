@@ -497,6 +497,18 @@ install_from_source() {
 # ------------------------------------------------------------------------------
 # Power Button Hardware Initializer & Policy Setup
 # ------------------------------------------------------------------------------
+install_driver_doctor() {
+    local doctor_source="$SCRIPT_DIR/tools/fpc1022-doctor"
+    local doctor_target="/usr/local/bin/fpc1022-doctor"
+    if [[ -f "$doctor_source" ]]; then
+        backup_managed_file "$doctor_target"
+        install -m 0755 "$doctor_source" "$doctor_target"
+        print_ok "Installed read-only post-update diagnostic"
+    else
+        print_warn "fpc1022-doctor source is missing; post-update checks will be unavailable."
+    fi
+}
+
 configure_power_button() {
     # 1. logind policy: Instant response & honor desktop inhibitors
     local logind_dir="/etc/systemd/logind.conf.d"
@@ -533,14 +545,12 @@ configure_power_button() {
     local wake_ok=false
 
     backup_managed_file "$wake_bin"
-    backup_managed_file /usr/local/bin/fpc1022-doctor
 
     if command -v gcc >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 && \
         pkg-config --exists libusb-1.0 && [[ -f "$wake_c" ]]; then
         if gcc -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=3 \
             -fPIE -pie -Wl,-z,relro,-z,now "$wake_c" \
             $(pkg-config --cflags --libs libusb-1.0) -o "$wake_bin"; then
-            install -m 0755 "$SCRIPT_DIR/tools/fpc1022-doctor" /usr/local/bin/fpc1022-doctor
             wake_ok=true
         fi
     fi
@@ -650,6 +660,8 @@ main() {
             fi
             ;;
     esac
+
+    install_driver_doctor
 
     print_step "3/5" "Optional power-button integration..."
     if [[ "$SENSOR_DETECTED" == "true" && "$POWER_BUTTON_MODE" == "true" ]]; then
