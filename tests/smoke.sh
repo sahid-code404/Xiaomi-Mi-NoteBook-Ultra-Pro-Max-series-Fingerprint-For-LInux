@@ -15,6 +15,7 @@ sh -n configs/fpc1022-sleep-wake
 install_help="$(bash install.sh --help)"
 grep -q -- '--build' <<< "$install_help" || fail "installer help is missing --build"
 grep -q -- '--verbose' <<< "$install_help" || fail "installer help is missing --verbose"
+grep -q -- '--power-button' <<< "$install_help" || fail "installer help is missing --power-button"
 
 uninstall_help="$(bash uninstall.sh --help)"
 grep -q -- '--cleanup-orphans' <<< "$uninstall_help" || fail "uninstaller help is missing opt-in cleanup option"
