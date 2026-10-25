@@ -551,11 +551,18 @@ configure_power_button() {
             if command -v systemctl >/dev/null 2>&1; then
                 local state_file="$BACKUP_ROOT/fpc1022-wake-service.state"
                 if [[ ! -f "$state_file" ]]; then
-                    if systemctl is-enabled fpc1022-wake.service >/dev/null 2>&1; then
-                        printf 'enabled\n' > "$state_file"
-                    else
-                        printf 'disabled\n' > "$state_file"
-                    fi
+                    {
+                        if systemctl is-enabled fpc1022-wake.service >/dev/null 2>&1; then
+                            printf 'enabled\n'
+                        else
+                            printf 'disabled\n'
+                        fi
+                        if systemctl is-active --quiet fpc1022-wake.service; then
+                            printf 'active\n'
+                        else
+                            printf 'inactive\n'
+                        fi
+                    } > "$state_file"
                 fi
                 run_cmd systemctl daemon-reload
                 run_cmd systemctl enable fpc1022-wake.service
