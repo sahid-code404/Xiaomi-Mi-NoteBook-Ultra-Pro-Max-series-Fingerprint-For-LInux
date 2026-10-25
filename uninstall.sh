@@ -249,6 +249,19 @@ revert_generic_source() {
         if [[ -z "$multiarch" ]] && command -v gcc >/dev/null 2>&1; then
             multiarch="$(gcc -print-multiarch 2>/dev/null || true)"
         fi
+        # The compiler or dpkg-dev may have been removed since installation.
+        # Prefer the multiarch directory containing the installed libfprint.
+        if [[ -z "$multiarch" ]]; then
+            local candidate
+            for candidate in /usr/lib/*-linux-gnu; do
+                [[ -d "$candidate" ]] || continue
+                if [[ -f "$candidate/libfprint-2.so.2.0.0" ||
+                      -e "$candidate/libfprint-2.so.2" ]]; then
+                    multiarch="${candidate#/usr/lib/}"
+                    break
+                fi
+            done
+        fi
         [[ -z "$multiarch" || ! -d "/usr/lib/$multiarch" ]] || lib_dir="/usr/lib/$multiarch"
     elif [[ -d /usr/lib64 ]]; then
         lib_dir="/usr/lib64"
